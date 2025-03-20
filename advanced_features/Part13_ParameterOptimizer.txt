@@ -1,0 +1,344 @@
+3. Dynamic Parameter Optimizer Agent
+pythonCopyclass ParameterOptimizerAgent:
+    """
+    Agent dedicated to dynamically optimizing system parameters based on performance metrics,
+    query types, and resource availability.
+    """
+
+    def __init__(self, llm_service=None, resource_monitor=None):
+        self.llm_service = llm_service or LLMService()
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+        self.parameter_history = {}
+        self.optimization_notes = {}
+        self.parameter_groups = self._define_parameter_groups()
+
+    def _define_parameter_groups(self):
+        """Define parameter groups and their relationships, constraints, and impact domains."""
+        return {
+            "search_parameters": {
+                "parameters": ["top_k", "similarity_threshold", "max_iterations", "strategy_weight"],
+                "impact_domains": ["accuracy", "recall", "response_time"],
+                "constraints": [
+                    {"type": "range", "parameter": "top_k", "min": 3, "max": 50},
+                    {"type": "range", "parameter": "similarity_threshold", "min": 0.5, "max": 0.95},
+                    {"type": "range", "parameter": "max_iterations", "min": 1, "max": 5}
+                ],
+                "trade_offs": [
+                    {"increase": "top_k", "decreases": ["response_time"], "increases": ["recall"]}
+                ]
+            },
+            "context_parameters": {
+                "parameters": ["knowledge_importance", "conversation_importance", "knowledge_tokens", "conversation_tokens"],
+                "impact_domains": ["coherence", "relevance", "memory_usage"],
+                "constraints": [
+                    {"type": "sum", "parameters": ["knowledge_importance", "conversation_importance"], "value": 10},
+                    {"type": "range", "parameter": "knowledge_tokens", "min": 2000, "max": 30000},
+                    {"type": "range", "parameter": "conversation_tokens", "min": 1000, "max": 10000}
+                ]
+            },
+            "response_parameters": {
+                "parameters": ["detail_level", "temperature", "max_tokens", "citation_style"],
+                "impact_domains": ["satisfaction", "accuracy", "response_time"],
+                "constraints": [
+                    {"type": "range", "parameter": "detail_level", "min": 1, "max": 10},
+                    {"type": "range", "parameter": "temperature", "min": 0.0, "max": 1.0}
+                ]
+            },
+            "resource_parameters": {
+                "parameters": ["batch_size", "parallel_processes", "model_selection"],
+                "impact_domains": ["throughput", "cost", "response_time"],
+                "constraints": [
+                    {"type": "resource_dependent", "parameter": "batch_size"},
+                    {"type": "resource_dependent", "parameter": "parallel_processes"}
+                ]
+            }
+        }
+
+    async def optimize_parameters(self, parameter_group, current_values, optimization_context):
+        """
+        Optimize parameters for a specific group based on context and performance history.
+
+        Args:
+            parameter_group: Name of the parameter group to optimize
+            current_values: Current parameter values
+            optimization_context: Context data for optimization (query type, performance metrics, etc.)
+
+        Returns:
+            Optimized parameter values with explanations
+        """
+        # Retrieve group definition
+        if parameter_group not in self.parameter_groups:
+            return {"error": f"Unknown parameter group: {parameter_group}", "values": current_values}
+
+        group_def = self.parameter_groups[parameter_group]
+
+        # Get resource state
+        resource_state = self.resource_monitor.get_current_state() if self.resource_monitor else {}
+
+        # Extract relevant performance history
+        history = self._extract_relevant_history(parameter_group, optimization_context)
+
+        # Generate optimization prompt
+        prompt = self._create_optimization_prompt(
+            parameter_group,
+            group_def,
+            current_values,
+            optimization_context,
+            resource_state,
+            history
+        )
+
+        # Get LLM optimization recommendation
+        optimization_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            note_id=f"parameter_optimization_{parameter_group}_{int(time.time())}"
+        )
+
+        try:
+            optimization = json.loads(optimization_result)
+
+            # Validate optimized values against constraints
+            validated_values = self._validate_parameters(optimization.get("values", {}), group_def)
+            optimization["values"] = validated_values
+
+            # Record optimization in history
+            self._record_optimization(parameter_group, current_values, validated_values, optimization_context)
+
+            # Store explanation notes
+            if "explanations" in optimization:
+                self.optimization_notes[f"{parameter_group}_{int(time.time())}"] = optimization["explanations"]
+
+            return optimization
+
+        except json.JSONDecodeError:
+            # Return current values on failure
+            return {"values": current_values, "error": "Failed to parse optimization result"}
+
+    def _create_optimization_prompt(self, group_name, group_def, current_values, context, resource_state, history):
+        """Create a detailed prompt for parameter optimization."""
+        parameters = group_def.get("parameters", [])
+        impact_domains = group_def.get("impact_domains", [])
+        constraints = group_def.get("constraints", [])
+        trade_offs = group_def.get("trade_offs", [])
+
+        # Format current values
+        current_values_str = json.dumps({p: current_values.get(p) for p in parameters if p in current_values}, indent=2)
+
+        # Format constraints
+        constraints_str = ""
+        for constraint in constraints:
+            if constraint["type"] == "range":
+                constraints_str += f"- {constraint['parameter']} must be between {constraint['min']} and {constraint['max']}\n"
+            elif constraint["type"] == "sum":
+                constraints_str += f"- The sum of {', '.join(constraint['parameters'])} must equal {constraint['value']}\n"
+            elif constraint["type"] == "resource_dependent":
+                constraints_str += f"- {constraint['parameter']} depends on available system resources\n"
+
+        # Format trade-offs
+        tradeoffs_str = ""
+        for tradeoff in trade_offs:
+            increases = tradeoff.get("increases", [])
+            decreases = tradeoff.get("decreases", [])
+            tradeoffs_str += f"- Increasing {tradeoff['increase']} will "
+            if increases:
+                tradeoffs_str += f"increase {', '.join(increases)} "
+            if increases and decreases:
+                tradeoffs_str += "but "
+            if decreases:
+                tradeoffs_str += f"decrease {', '.join(decreases)}"
+            tradeoffs_str += "\n"
+
+        # Format context
+        context_str = json.dumps(context, indent=2)
+
+        # Format resource state
+        resource_str = json.dumps(resource_state, indent=2)
+
+        # Format history
+        history_str = ""
+        for entry in history:
+            history_str += f"- Previous optimization ({entry['timestamp']}):\n"
+            history_str += f"  Before: {json.dumps(entry['before'], indent=2)}\n"
+            history_str += f"  After: {json.dumps(entry['after'], indent=2)}\n"
+            history_str += f"  Performance change: {entry.get('performance_change', 'Unknown')}\n\n"
+
+        # Build the prompt
+        prompt = f"""
+        You are a parameter optimization expert for a knowledge corpus research system.
+        Optimize the parameters in the "{group_name}" group based on the context and history provided.
+
+        PARAMETER GROUP: {group_name}
+
+        PARAMETERS TO OPTIMIZE:
+        {', '.join(parameters)}
+
+        CURRENT VALUES:
+        {current_values_str}
+
+        IMPACT DOMAINS:
+        {', '.join(impact_domains)}
+
+        CONSTRAINTS:
+        {constraints_str}
+
+        TRADE-OFFS:
+        {tradeoffs_str}
+
+        OPTIMIZATION CONTEXT:
+        {context_str}
+
+        SYSTEM RESOURCE STATE:
+        {resource_str}
+
+        OPTIMIZATION HISTORY:
+        {history_str if history_str else "No previous optimizations for this group."}
+
+        Based on this information, determine the optimal values for each parameter.
+        Consider the specific query type, resource state, and performance history.
+
+        Return your optimization as a JSON object with:
+        1. "values": A dictionary of parameter names to optimized values
+        2. "explanations": A dictionary explaining the rationale for each parameter change
+        3. "expected_impact": Expected impact on each relevant domain
+        """
+
+        return prompt
+
+    def _validate_parameters(self, values, group_def):
+        """Validate parameter values against their constraints."""
+        validated = {}
+        constraints = group_def.get("constraints", [])
+
+        # Apply range constraints
+        for constraint in constraints:
+            if constraint["type"] == "range" and constraint["parameter"] in values:
+                param = constraint["parameter"]
+                validated[param] = max(constraint["min"], min(constraint["max"], values[param]))
+
+        # Apply sum constraints
+        for constraint in constraints:
+            if constraint["type"] == "sum":
+                params = constraint["parameters"]
+                target_sum = constraint["value"]
+
+                # Check if we have all the parameters in this constraint
+                if all(p in values for p in params):
+                    current_sum = sum(values[p] for p in params)
+
+                    # If sum doesn't match, scale values proportionally
+                    if current_sum != target_sum and current_sum > 0:
+                        scale_factor = target_sum / current_sum
+                        for p in params:
+                            validated[p] = values[p] * scale_factor
+
+        # Copy remaining values
+        for param, value in values.items():
+            if param not in validated:
+                validated[param] = value
+
+        return validated
+
+    def _extract_relevant_history(self, parameter_group, context):
+        """Extract relevant history for this parameter group and context."""
+        if parameter_group not in self.parameter_history:
+            return []
+
+        history = self.parameter_history[parameter_group]
+
+        # Filter by relevance to current context
+        relevant_history = []
+        query_type = context.get("query_type")
+
+        for entry in history:
+            entry_query_type = entry.get("context", {}).get("query_type")
+
+            # Include if same query type or if recent (last 5 entries)
+            if entry_query_type == query_type or len(relevant_history) < 5:
+                relevant_history.append(entry)
+
+        # Sort by recency and return most recent 10
+        relevant_history.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return relevant_history[:10]
+
+    def _record_optimization(self, parameter_group, before_values, after_values, context):
+        """Record an optimization in the history."""
+        if parameter_group not in self.parameter_history:
+            self.parameter_history[parameter_group] = []
+
+        entry = {
+            "timestamp": time.time(),
+            "before": before_values,
+            "after": after_values,
+            "context": context
+        }
+
+        self.parameter_history[parameter_group].append(entry)
+
+        # Keep history at a reasonable size
+        if len(self.parameter_history[parameter_group]) > 100:
+            self.parameter_history[parameter_group] = self.parameter_history[parameter_group][-100:]
+
+    async def evaluate_parameter_impact(self, parameter_group, before_values, after_values, performance_metrics):
+        """Evaluate the impact of parameter changes on performance."""
+        if parameter_group not in self.parameter_groups:
+            return {"error": f"Unknown parameter group: {parameter_group}"}
+
+        group_def = self.parameter_groups[parameter_group]
+        impact_domains = group_def.get("impact_domains", [])
+
+        # Create evaluation prompt
+        prompt = f"""
+        Evaluate the impact of parameter changes on system performance.
+
+        PARAMETER GROUP: {parameter_group}
+
+        BEFORE VALUES:
+        {json.dumps(before_values, indent=2)}
+
+        AFTER VALUES:
+        {json.dumps(after_values, indent=2)}
+
+        PERFORMANCE METRICS:
+        {json.dumps(performance_metrics, indent=2)}
+
+        IMPACT DOMAINS:
+        {', '.join(impact_domains)}
+
+        Analyze how these parameter changes affected performance in each impact domain.
+        Calculate specific improvements or regressions based on the metrics.
+
+        Return your analysis as a JSON object with:
+        1. "domain_impacts": A dictionary mapping each impact domain to a numeric score (-10 to +10)
+        2. "overall_impact": An overall impact score (-10 to +10)
+        3. "successful_changes": List of parameter changes that improved performance
+        4. "detrimental_changes": List of parameter changes that worsened performance
+        5. "recommendations": Suggestions for future parameter adjustments
+        """
+
+        evaluation_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            evaluation = json.loads(evaluation_result)
+
+            # Update history with performance change
+            for entry in self.parameter_history.get(parameter_group, []):
+                if (entry.get("before") == before_values and
+                    entry.get("after") == after_values and
+                    "performance_change" not in entry):
+                    entry["performance_change"] = evaluation.get("overall_impact")
+                    break
+
+            return evaluation
+
+        except json.JSONDecodeError:
+            return {
+                "domain_impacts": {domain: 0 for domain in impact_domains},
+                "overall_impact": 0,
+                "error": "Failed to parse evaluation result"
+            }

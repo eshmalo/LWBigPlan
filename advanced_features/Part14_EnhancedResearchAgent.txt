@@ -1,0 +1,659 @@
+4. Enhanced Research Agent with Self-Improvement Capabilities
+pythonCopyclass EnhancedResearchAgent:
+    """
+    Advanced research agent with self-improvement capabilities, dynamic strategy selection,
+    and comprehensive understanding of research methodologies.
+    """
+
+    def __init__(self, vector_db, llm_service=None, resource_monitor=None):
+        self.vector_db = vector_db
+        self.llm_service = llm_service or LLMService(default_model="gpt-4")
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+
+        # Research memory and learning
+        self.research_memory = {}
+        self.strategy_effectiveness = {}
+        self.query_patterns = {}
+
+        # Self-improvement
+        self.improvement_history = []
+        self.strategy_templates = {}
+
+        # State tracking
+        self.active_research_sessions = {}
+        self.notes = {}
+
+    async def initialize(self):
+        """Initialize agent and generate initial research strategies."""
+        await self._generate_research_strategies()
+
+    async def _generate_research_strategies(self):
+        """Generate initial set of research strategies for different query types."""
+        query_types = [
+            "factual", "conceptual", "comparative", "historical",
+            "procedural", "exploratory", "investigative", "analytical"
+        ]
+
+        for query_type in query_types:
+            strategy = await self._generate_strategy_for_query_type(query_type)
+            self.strategy_templates[query_type] = strategy
+
+    async def _generate_strategy_for_query_type(self, query_type):
+        """Generate research strategy template for a specific query type."""
+        prompt = f"""
+        Design an optimal research strategy for a {query_type} query in a knowledge corpus.
+
+        Create a comprehensive research strategy that specifies:
+
+        1. Initial search approach (parameters, priorities, metadata focus)
+        2. Information evaluation criteria
+        3. Multi-iteration research plan
+        4. Information synthesis approach
+        5. Specialized techniques for {query_type} queries
+        6. Potential pitfalls and mitigations
+        7. Success criteria
+
+        The strategy should be adaptable to different complexities and domains
+        while optimized for {query_type} information needs.
+
+        Return as a structured JSON research strategy template.
+        """
+
+        strategy_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(strategy_result)
+        except:
+            # Fallback basic strategy
+            return {
+                "query_type": query_type,
+                "initial_search": {
+                    "top_k": 10,
+                    "similarity_threshold": 0.7,
+                    "priority": "relevance"
+                },
+                "iterations": 2,
+                "evaluation_criteria": ["relevance", "completeness", "authority"],
+                "success_criteria": {
+                    "min_information_sufficiency": 0.7,
+                    "min_sources": 3
+                }
+            }
+
+    async def research(self, query, context=None, initial_params=None):
+        """
+        Conduct research with dynamic parameter adjustment and strategy selection.
+
+        Args:
+            query: User's question
+            context: Optional conversation context
+            initial_params: Optional initial parameters
+
+        Returns:
+            Research results
+        """
+        # Generate a unique ID for this research session
+        research_id = f"research_{int(time.time())}"
+
+        # Analyze query to determine type and optimal strategy
+        query_analysis = await self._analyze_query(query, context)
+
+        # Create research plan based on query analysis and selected strategy
+        research_plan = await self._create_research_plan(query, query_analysis, initial_params)
+
+        # Record plan and analysis
+        self.notes[f"{research_id}_query_analysis"] = query_analysis
+        self.notes[f"{research_id}_research_plan"] = research_plan
+
+        # Execute initial search
+        initial_results = await self._execute_search(
+            query=query,
+            params=research_plan["search_parameters"]
+        )
+
+        # Analyze results to determine next steps
+        analysis = await self._analyze_results(query, initial_results, research_plan, context)
+
+        # Record analysis
+        self.notes[f"{research_id}_initial_analysis"] = analysis
+
+        # Initialize active research session
+        self.active_research_sessions[research_id] = {
+            "query": query,
+            "query_analysis": query_analysis,
+            "plan": research_plan,
+            "results": initial_results,
+            "analysis": analysis,
+            "iterations": 1,
+            "iteration_analyses": [analysis],
+            "all_results": initial_results,
+            "seen_chunk_ids": {result.metadata["chunk_id"] for result in initial_results}
+        }
+
+        # Check if we need further research
+        if (analysis["information_sufficiency"] >= research_plan["success_criteria"]["min_information_sufficiency"]
+            or not analysis["follow_up_queries"] or research_plan["max_iterations"] <= 1):
+            # Initial research is sufficient
+            self.notes[f"{research_id}_conclusion"] = "Initial research sufficient"
+            results = self._prepare_final_results(research_id)
+
+            # Update strategy effectiveness
+            self._update_strategy_effectiveness(
+                query_type=query_analysis["query_type"],
+                success_level=analysis["information_sufficiency"],
+                iterations=1
+            )
+
+            return results
+
+        # Conduct iterative research
+        session = self.active_research_sessions[research_id]
+
+        for iteration in range(2, research_plan["max_iterations"] + 1):
+            # Adjust parameters based on previous results
+            adjusted_params = await self._adjust_search_parameters(
+                research_id=research_id,
+                iteration=iteration,
+                previous_analysis=analysis
+            )
+
+            # Record parameter adjustments
+            self.notes[f"{research_id}_iteration_{iteration}_params"] = adjusted_params
+
+            # Execute follow-up queries
+            iteration_results = []
+
+            for follow_up_query in analysis["follow_up_queries"]:
+                # Execute search
+                query_results = await self._execute_search(
+                    query=follow_up_query,
+                    params=adjusted_params
+                )
+
+                # Filter out already seen chunks
+                new_results = [
+                    result for result in query_results
+                    if result.metadata["chunk_id"] not in session["seen_chunk_ids"]
+                ]
+
+                # Update seen chunks
+                for result in new_results:
+                    session["seen_chunk_ids"].add(result.metadata["chunk_id"])
+
+                # Add to iteration results
+                iteration_results.extend(new_results)
+
+            # Record iteration results
+            self.notes[f"{research_id}_iteration_{iteration}_results_count"] = len(iteration_results)
+
+            # If no new results, break
+            if not iteration_results:
+                self.notes[f"{research_id}_conclusion"] = "No new results found in iteration"
+                break
+
+            # Add new results to overall collection
+            session["all_results"].extend(iteration_results)
+
+            # Analyze combined results
+            analysis = await self._analyze_results(
+                query=query,
+                results=session["all_results"],
+                research_plan=research_plan,
+                context=context
+            )
+
+            # Update session
+            session["analysis"] = analysis
+            session["iteration_analyses"].append(analysis)
+            session["iterations"] = iteration
+
+            # Record analysis
+            self.notes[f"{research_id}_iteration_{iteration}_analysis"] = analysis
+
+            # Check if we've reached sufficient information
+            if analysis["information_sufficiency"] >= research_plan["success_criteria"]["min_information_sufficiency"]:
+                self.notes[f"{research_id}_conclusion"] = "Sufficient information reached"
+                break
+
+        # Prepare final results
+        results = self._prepare_final_results(research_id)
+
+        # Update strategy effectiveness
+        self._update_strategy_effectiveness(
+            query_type=query_analysis["query_type"],
+            success_level=analysis["information_sufficiency"],
+            iterations=session["iterations"]
+        )
+
+        # Learn from this research session
+        await self._learn_from_research_session(research_id)
+
+        return results
+
+    async def _analyze_query(self, query, context=None):
+        """Analyze query to determine type, complexity, and optimal strategy."""
+        # Format context if available
+        context_text = ""
+        if context:
+            context_text = "CONVERSATION CONTEXT:\n"
+            for msg in context[-5:]:  # Use last 5 messages
+                role = "User" if msg["role"] == "user" else "Assistant"
+                context_text += f"{role}: {msg['content'][:200]}...\n"
+
+        # Create analysis prompt
+        prompt = f"""
+        Analyze this query to determine the optimal research strategy.
+
+        QUERY:
+        {query}
+
+        {context_text}
+
+        Provide a detailed analysis including:
+
+        1. Query type (factual, conceptual, comparative, historical, procedural, exploratory, investigative, analytical)
+        2. Complexity level (1-10)
+        3. Subject domain (general knowledge, specialized field, technical, etc.)
+        4. Key entities that should be researched
+        5. Expected information structure (facts, relationships, processes, etc.)
+        6. Potential information sources within a knowledge corpus
+        7. Special considerations for this query
+
+        Return your analysis as a structured JSON object.
+        """
+
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(analysis_result)
+        except:
+            # Fallback basic analysis
+            return {
+                "query_type": "factual",
+                "complexity": 5,
+                "subject_domain": "general knowledge",
+                "key_entities": [query],
+                "information_structure": "facts",
+                "potential_sources": ["general documents"]
+            }
+
+    async def _create_research_plan(self, query, query_analysis, initial_params=None):
+        """Create a research plan based on query analysis and strategy templates."""
+        # Get query type
+        query_type = query_analysis.get("query_type", "factual").lower()
+
+        # Get the strategy template
+        strategy = None
+        if query_type in self.strategy_templates:
+            strategy = deepcopy(self.strategy_templates[query_type])
+        else:
+            # Fallback to factual or the first available strategy
+            strategy = deepcopy(self.strategy_templates.get(
+                "factual",
+                next(iter(self.strategy_templates.values())) if self.strategy_templates else {}
+            ))
+
+        # If we have initial parameters, override the strategy defaults
+        if initial_params:
+            for k, v in initial_params.items():
+                if k in strategy.get("initial_search", {}):
+                    strategy["initial_search"][k] = v
+                elif k == "max_iterations" and "iterations" in strategy:
+                    strategy["iterations"] = v
+
+        # Adjust strategy based on query complexity
+        complexity = query_analysis.get("complexity", 5)
+        if complexity > 7:
+            # For complex queries, increase search breadth
+            if "initial_search" in strategy:
+                strategy["initial_search"]["top_k"] = max(15, strategy["initial_search"].get("top_k", 10))
+                strategy["initial_search"]["similarity_threshold"] = min(
+                    0.65, strategy["initial_search"].get("similarity_threshold", 0.7)
+                )
+            
+            # Increase iterations for complex queries
+            if "iterations" in strategy:
+                strategy["iterations"] = max(3, strategy["iterations"])
+
+        # Create final research plan
+        plan = {
+            "query_type": query_type,
+            "complexity": complexity,
+            "search_parameters": strategy.get("initial_search", {
+                "top_k": 10,
+                "similarity_threshold": 0.7
+            }),
+            "max_iterations": strategy.get("iterations", 2),
+            "evaluation_criteria": strategy.get("evaluation_criteria", ["relevance", "completeness"]),
+            "success_criteria": strategy.get("success_criteria", {
+                "min_information_sufficiency": 0.7
+            })
+        }
+
+        return plan
+
+    async def _execute_search(self, query, params):
+        """Execute a search with the given parameters."""
+        # Extract parameters
+        top_k = params.get("top_k", 10)
+        similarity_threshold = params.get("similarity_threshold", 0.7)
+        metadata_filters = params.get("metadata_filters", None)
+
+        # Execute search
+        results = await self.vector_db.similarity_search(
+            query=query,
+            top_k=top_k,
+            threshold=similarity_threshold,
+            filter_dict=metadata_filters
+        )
+
+        return results
+
+    async def _analyze_results(self, query, results, research_plan, context=None):
+        """Analyze search results to determine next steps."""
+        # Format results for analysis (implementation depends on your document format)
+        formatted_results = self._format_results(results)
+        
+        # Format evaluation criteria from research plan
+        criteria_text = ", ".join(research_plan.get("evaluation_criteria", []))
+        
+        # Format context if available
+        context_text = ""
+        if context:
+            context_text = "CONVERSATION CONTEXT:\n"
+            for msg in context[-3:]:  # Use last 3 messages
+                role = "User" if msg["role"] == "user" else "Assistant"
+                context_text += f"{role}: {msg['content'][:100]}...\n"
+
+        # Create analysis prompt
+        prompt = f"""
+        Analyze these search results for the query: "{query}"
+
+        SEARCH RESULTS:
+        {formatted_results}
+
+        EVALUATION CRITERIA:
+        {criteria_text}
+
+        {context_text}
+
+        Determine how well these results answer the query and what information is still missing.
+        Return your analysis as JSON:
+
+        {{
+            "information_sufficiency": 0.0-1.0 (how well the results answer the query),
+            "key_findings": ["list", "of", "main", "points", "from", "results"],
+            "information_gaps": ["list", "of", "aspects", "missing", "or", "inadequate"],
+            "follow_up_queries": ["specific", "queries", "to", "fill", "gaps"],
+            "irrelevant_results": [indices of irrelevant results],
+            "confidence_assessment": 0.0-1.0 (confidence in the completeness of information)
+        }}
+        """
+
+        # Get LLM analysis
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        # Parse and return analysis
+        try:
+            return json.loads(analysis_result)
+        except:
+            # Fallback basic analysis
+            return {
+                "information_sufficiency": 0.5,
+                "key_findings": ["Unable to parse findings"],
+                "information_gaps": ["Unable to parse gaps"],
+                "follow_up_queries": [],
+                "irrelevant_results": [],
+                "confidence_assessment": 0.5
+            }
+
+    async def _adjust_search_parameters(self, research_id, iteration, previous_analysis):
+        """Adjust search parameters based on previous results analysis."""
+        session = self.active_research_sessions[research_id]
+        current_params = session["plan"]["search_parameters"]
+        
+        # Create parameter adjustment prompt
+        prompt = f"""
+        Optimize search parameters for iteration {iteration} based on previous results.
+
+        QUERY: {session["query"]}
+        
+        CURRENT PARAMETERS:
+        {json.dumps(current_params, indent=2)}
+        
+        PREVIOUS RESULTS ANALYSIS:
+        {json.dumps(previous_analysis, indent=2)}
+        
+        ITERATION: {iteration} of {session["plan"]["max_iterations"]}
+        
+        Based on the analysis, recommend adjusted parameters for the next search iteration.
+        Focus on addressing the information gaps identified in the analysis.
+        
+        Return only a JSON object with the updated parameters:
+        {{
+            "top_k": number,
+            "similarity_threshold": number,
+            "metadata_filters": {{optional filters based on analysis}}
+        }}
+        """
+        
+        # Get LLM parameter adjustments
+        adjustment_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            adjusted_params = json.loads(adjustment_result)
+            
+            # Merge with current parameters (keeping any not explicitly changed)
+            for k, v in current_params.items():
+                if k not in adjusted_params:
+                    adjusted_params[k] = v
+                    
+            return adjusted_params
+        except:
+            # Fallback: make some simple adjustments
+            adjusted_params = current_params.copy()
+            
+            # If information sufficiency is low, reduce similarity threshold
+            if previous_analysis.get("information_sufficiency", 0) < 0.5:
+                adjusted_params["similarity_threshold"] = max(0.5, adjusted_params.get("similarity_threshold", 0.7) - 0.05)
+                adjusted_params["top_k"] = min(30, adjusted_params.get("top_k", 10) + 5)
+            
+            return adjusted_params
+
+    def _prepare_final_results(self, research_id):
+        """Prepare final results from a research session."""
+        session = self.active_research_sessions[research_id]
+        
+        # Get final analysis
+        final_analysis = session["analysis"]
+        
+        # Deduplicate and organize results
+        all_results = session["all_results"]
+        
+        # Build results object with key findings, sufficiency, etc.
+        result = {
+            "research_id": research_id,
+            "original_query": session["query"],
+            "chunks": all_results,
+            "chunk_count": len(all_results),
+            "key_findings": final_analysis.get("key_findings", []),
+            "information_gaps": final_analysis.get("information_gaps", []),
+            "information_sufficiency": final_analysis.get("information_sufficiency", 0),
+            "iterations": session["iterations"],
+            "query_analysis": session["query_analysis"],
+            "conclusion": self.notes.get(f"{research_id}_conclusion", "")
+        }
+        
+        return result
+        
+    def _update_strategy_effectiveness(self, query_type, success_level, iterations):
+        """Update strategy effectiveness metrics based on research outcomes."""
+        if query_type not in self.strategy_effectiveness:
+            self.strategy_effectiveness[query_type] = {
+                "success_scores": [],
+                "iteration_counts": [],
+                "total_uses": 0
+            }
+            
+        # Add this research instance to effectiveness tracking
+        self.strategy_effectiveness[query_type]["success_scores"].append(success_level)
+        self.strategy_effectiveness[query_type]["iteration_counts"].append(iterations)
+        self.strategy_effectiveness[query_type]["total_uses"] += 1
+        
+        # Keep history to a reasonable size
+        max_history = 50
+        if len(self.strategy_effectiveness[query_type]["success_scores"]) > max_history:
+            self.strategy_effectiveness[query_type]["success_scores"] = self.strategy_effectiveness[query_type]["success_scores"][-max_history:]
+            self.strategy_effectiveness[query_type]["iteration_counts"] = self.strategy_effectiveness[query_type]["iteration_counts"][-max_history:]
+            
+    async def _learn_from_research_session(self, research_id):
+        """Learn from completed research session to improve future sessions."""
+        if research_id not in self.active_research_sessions:
+            return
+            
+        session = self.active_research_sessions[research_id]
+        
+        # Only learn from sessions with sufficient data
+        if session["iterations"] < 2 or not session["iteration_analyses"]:
+            return
+            
+        # Create learning prompt
+        prompt = f"""
+        Analyze this completed research session to identify improvements to the research strategy.
+        
+        QUERY: {session["query"]}
+        QUERY TYPE: {session["query_analysis"]["query_type"]}
+        QUERY COMPLEXITY: {session["query_analysis"]["complexity"]}
+        
+        INITIAL PLAN:
+        {json.dumps(session["plan"], indent=2)}
+        
+        ITERATIONS: {session["iterations"]}
+        
+        ITERATION ANALYSES:
+        {json.dumps(session["iteration_analyses"], indent=2)}
+        
+        FINAL SUFFICIENCY: {session["analysis"]["information_sufficiency"]}
+        
+        Based on this research session, suggest improvements to the research strategy for this query type.
+        Focus on:
+        1. Initial parameter settings
+        2. Iteration strategy
+        3. Search effectiveness
+        4. Information gap identification
+        
+        Return a JSON object with your recommendations:
+        {{
+            "strategy_updates": {{specific changes to strategy template}},
+            "effectiveness_assessment": "brief assessment of what worked/didn't work",
+            "pattern_observations": ["observed patterns in this query type"],
+            "implementation_priority": 1-10 (how important these changes are)
+        }}
+        """
+        
+        # Get LLM learning recommendations
+        learning_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            learning = json.loads(learning_result)
+            
+            # Record learning
+            self.improvement_history.append({
+                "timestamp": time.time(),
+                "research_id": research_id,
+                "query_type": session["query_analysis"]["query_type"],
+                "recommendations": learning,
+                "implemented": False
+            })
+            
+            # If high priority recommendations, consider implementing them
+            if learning.get("implementation_priority", 0) >= 8:
+                await self._implement_strategy_improvements(
+                    query_type=session["query_analysis"]["query_type"],
+                    improvements=learning.get("strategy_updates", {})
+                )
+        except:
+            # Failed to parse learning results
+            pass
+        
+    async def _implement_strategy_improvements(self, query_type, improvements):
+        """Implement improvements to a strategy template."""
+        if query_type not in self.strategy_templates:
+            return
+            
+        strategy = self.strategy_templates[query_type]
+        
+        # Create implementation prompt
+        prompt = f"""
+        You are updating a research strategy template based on learned improvements.
+        
+        CURRENT STRATEGY TEMPLATE:
+        {json.dumps(strategy, indent=2)}
+        
+        PROPOSED IMPROVEMENTS:
+        {json.dumps(improvements, indent=2)}
+        
+        Update the strategy template to incorporate these improvements while maintaining
+        coherence and compatibility with the existing structure.
+        
+        Return the complete updated strategy template as a JSON object.
+        """
+        
+        # Get LLM updated strategy
+        updated_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            updated_strategy = json.loads(updated_result)
+            
+            # Update strategy template
+            self.strategy_templates[query_type] = updated_strategy
+            
+            # Mark improvement as implemented in history
+            for item in self.improvement_history:
+                if (item["query_type"] == query_type and 
+                    not item["implemented"] and 
+                    "strategy_updates" in item.get("recommendations", {})):
+                    item["implemented"] = True
+                    break
+        except:
+            # Failed to update strategy
+            pass
+            
+    def _format_results(self, results):
+        """Format search results for analysis."""
+        formatted = ""
+        for i, result in enumerate(results[:10]):  # Limit to 10 results for prompt
+            content = result.page_content[:300] + "..." if len(result.page_content) > 300 else result.page_content
+            metadata = result.metadata
+            source = metadata.get("document_name", "Unknown source")
+            
+            formatted += f"[{i}] {source}\n{content}\n\n"
+            
+        if len(results) > 10:
+            formatted += f"... {len(results) - 10} more results not shown ..."
+            
+        return formatted

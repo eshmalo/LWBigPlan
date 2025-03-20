@@ -1,0 +1,517 @@
+7. Response Generation System with Self-Evaluation
+
+The Response Generation System is responsible for creating coherent, accurate, and informative responses based on the research findings. It incorporates self-evaluation to verify response quality before delivery to the user.
+
+7.1 Response Generator Core
+
+```python
+class ResponseGenerator:
+    """
+    Generates responses using a structured approach with research findings 
+    and self-evaluation capabilities.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.response_quality_metrics = []
+        self.self_correction_attempts = {}
+        self.evaluation_templates = {}
+        self.improvement_strategies = {}
+        
+        # Track statistics for continuous improvement
+        self.stats = {
+            "total_responses": 0,
+            "self_corrections": 0,
+            "avg_quality_score": 0
+        }
+
+    async def initialize(self):
+        """Initialize response generator with evaluation templates."""
+        await self._load_evaluation_templates()
+        await self._load_improvement_strategies()
+
+    async def generate_response(self, query, knowledge_chunks, conversation_history, response_params):
+        """Generate a response based on knowledge and conversation context with self-evaluation."""
+        # Format knowledge context
+        knowledge_text = self._format_knowledge_chunks(
+            knowledge_chunks,
+            include_citations=response_params.get("include_citations", True)
+        )
+
+        # Format conversation history
+        conversation_text = self._format_conversation(
+            conversation_history,
+            importance=response_params.get("conversation_importance", 5)
+        )
+
+        # Create system instruction
+        system_instruction = self._create_system_instruction(response_params)
+
+        # Create prompt with knowledge first (Claude's preference)
+        prompt = f"""{system_instruction}
+
+KNOWLEDGE CONTEXT:
+{knowledge_text}
+
+CONVERSATION HISTORY:
+{conversation_text}
+
+USER QUERY:
+{query}
+"""
+
+        # Generate initial response
+        initial_response = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=response_params.get("temperature", 0.7),
+            max_tokens=response_params.get("max_tokens", None)
+        )
+
+        # Evaluate response quality
+        evaluation_result = await self._evaluate_response(
+            query=query,
+            response=initial_response,
+            knowledge_chunks=knowledge_chunks,
+            eval_criteria=response_params.get("eval_criteria", ["accuracy", "completeness", "coherence", "relevance"])
+        )
+
+        # Track for statistics
+        self.stats["total_responses"] += 1
+        self.response_quality_metrics.append(evaluation_result)
+        
+        response_id = f"response_{int(time.time())}"
+        
+        # Check if improvement needed
+        if evaluation_result["overall_score"] < response_params.get("quality_threshold", 0.7):
+            # Apply self-correction
+            improved_response = await self._improve_response(
+                initial_response=initial_response,
+                evaluation=evaluation_result,
+                query=query,
+                knowledge_chunks=knowledge_chunks,
+                conversation_history=conversation_history,
+                response_params=response_params
+            )
+            
+            # Track self-correction
+            self.stats["self_corrections"] += 1
+            self.self_correction_attempts[response_id] = {
+                "initial_response": initial_response,
+                "initial_evaluation": evaluation_result,
+                "improved_response": improved_response
+            }
+            
+            return improved_response
+        else:
+            return initial_response
+
+    async def _evaluate_response(self, query, response, knowledge_chunks, eval_criteria):
+        """Evaluate the quality of a generated response across multiple dimensions."""
+        # Format knowledge for evaluation
+        knowledge_text = self._format_knowledge_chunks(knowledge_chunks, include_citations=False)
+        
+        # Get evaluation template
+        evaluation_template = self._get_evaluation_template(eval_criteria)
+        
+        # Create evaluation prompt
+        prompt = f"""
+        Evaluate the quality of this response to the user's query.
+        
+        USER QUERY:
+        {query}
+        
+        RESPONSE TO EVALUATE:
+        {response}
+        
+        AVAILABLE KNOWLEDGE:
+        {knowledge_text}
+        
+        Evaluate the response on the following criteria:
+        {evaluation_template["criteria_description"]}
+        
+        For each criterion, provide:
+        1. A score from 0.0 to 1.0
+        2. Specific reasons for the score with examples from the response
+        3. Suggestions for improvement
+        
+        Finally, calculate an overall quality score and determine if the response needs improvement.
+        
+        Return your evaluation as a JSON object following this structure:
+        {evaluation_template["response_format"]}
+        """
+        
+        # Get evaluation
+        evaluation_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            evaluation = json.loads(evaluation_result)
+            
+            # Update stats
+            old_avg = self.stats["avg_quality_score"]
+            total_count = self.stats["total_responses"]
+            self.stats["avg_quality_score"] = ((old_avg * (total_count - 1)) + evaluation["overall_score"]) / total_count
+            
+            return evaluation
+            
+        except Exception as e:
+            # Fallback evaluation if parsing fails
+            return {
+                "accuracy": {"score": 0.7, "reasons": ["Unable to parse full evaluation"]},
+                "completeness": {"score": 0.7, "reasons": ["Unable to parse full evaluation"]},
+                "coherence": {"score": 0.8, "reasons": ["Unable to parse full evaluation"]},
+                "relevance": {"score": 0.8, "reasons": ["Unable to parse full evaluation"]},
+                "overall_score": 0.75,
+                "needs_improvement": False,
+                "improvement_areas": ["Unable to parse full evaluation"]
+            }
+
+    async def _improve_response(self, initial_response, evaluation, query, knowledge_chunks, conversation_history, response_params):
+        """Improve a response based on evaluation feedback."""
+        # Format knowledge context
+        knowledge_text = self._format_knowledge_chunks(knowledge_chunks, include_citations=True)
+        
+        # Get appropriate improvement strategy
+        strategy = self._select_improvement_strategy(evaluation)
+        
+        # Create improvement prompt
+        prompt = f"""
+        Improve this response based on the evaluation feedback.
+        
+        USER QUERY:
+        {query}
+        
+        ORIGINAL RESPONSE:
+        {initial_response}
+        
+        EVALUATION FEEDBACK:
+        {json.dumps(evaluation, indent=2)}
+        
+        KNOWLEDGE CONTEXT:
+        {knowledge_text}
+        
+        IMPROVEMENT STRATEGY:
+        {strategy["description"]}
+        
+        Focus specifically on improving these areas:
+        {", ".join(evaluation.get("improvement_areas", ["overall quality"]))}
+        
+        Generate a completely revised response that addresses all the issues identified in the evaluation.
+        The improved response should:
+        1. Maintain all correct information from the original response
+        2. Fix any factual errors identified
+        3. Add missing information where noted
+        4. Improve structure and coherence if needed
+        5. Ensure all claims are supported by the knowledge context
+        6. Use appropriate citations where relevant
+        """
+        
+        # Generate improved response
+        improved_response = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=response_params.get("temperature", 0.4),
+            max_tokens=response_params.get("max_tokens", None)
+        )
+        
+        return improved_response
+
+    def _create_system_instruction(self, response_params):
+        """Create system instruction based on response parameters."""
+        # Base instruction
+        instruction = "You are a knowledgeable assistant with expertise in researching and explaining information from a knowledge corpus."
+
+        # Add detail level
+        detail_level = response_params.get("detail_level", 7)
+        if detail_level <= 3:
+            instruction += " Provide concise, direct answers."
+        elif detail_level <= 7:
+            instruction += " Provide balanced, informative answers with appropriate detail."
+        else:
+            instruction += " Provide comprehensive, detailed explanations with nuance and depth."
+
+        # Add citation instructions
+        if response_params.get("include_citations", True):
+            instruction += " Cite sources using the reference numbers provided in the knowledge context [1], [2], etc."
+
+        # Add query-specific instructions
+        query_type = response_params.get("query_type", "factual")
+        if query_type == "factual":
+            instruction += " Focus on factual accuracy and clarity."
+        elif query_type == "interpretive":
+            instruction += " Acknowledge various interpretations and perspectives."
+        elif query_type == "comparative":
+            instruction += " Compare and contrast different views or sources."
+        elif query_type == "follow_up":
+            instruction += " Build upon the previous conversation while addressing the new question."
+
+        # Add knowledge usage instruction
+        instruction += " Base your answer on the provided knowledge context. If the information needed is not in the context, acknowledge this limitation."
+
+        return instruction
+
+    def _format_knowledge_chunks(self, chunks, include_citations=True):
+        """Format knowledge chunks for inclusion in prompts."""
+        if not chunks:
+            return "No relevant knowledge available."
+
+        formatted = ""
+        for i, chunk in enumerate(chunks):
+            # Format source information
+            metadata = chunk.metadata
+            source_info = f"{metadata.get('document_name', 'Unknown')}"
+
+            # Add specific location information if available
+            location_info = []
+            if "chapter" in metadata and metadata["chapter"]:
+                location_info.append(f"Chapter: {metadata['chapter']}")
+            if "section" in metadata and metadata["section"]:
+                location_info.append(f"Section: {metadata['section']}")
+            if "page" in metadata and metadata["page"]:
+                location_info.append(f"Page: {metadata['page']}")
+
+            if location_info:
+                source_info += f" ({', '.join(location_info)})"
+
+            # Format the chunk
+            if include_citations:
+                formatted += f"[{i+1}] {source_info}\n{chunk.page_content}\n\n"
+            else:
+                formatted += f"{source_info}\n{chunk.page_content}\n\n"
+
+        return formatted
+
+    def _format_conversation(self, conversation, importance=5):
+        """Format conversation history based on importance."""
+        if not conversation:
+            return "No previous conversation."
+
+        # Determine how many messages to include based on importance
+        if importance <= 3:
+            # Low importance: just the last exchange
+            messages = conversation[-2:] if len(conversation) >= 2 else conversation
+        elif importance <= 7:
+            # Medium importance: last 3 exchanges
+            messages = conversation[-6:] if len(conversation) >= 6 else conversation
+        else:
+            # High importance: more context
+            messages = conversation[-10:] if len(conversation) >= 10 else conversation
+
+        # Format messages
+        formatted = ""
+        for msg in messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            formatted += f"{role}: {msg['content']}\n\n"
+
+        return formatted
+        
+    async def _load_evaluation_templates(self):
+        """Load evaluation templates using LLM to define different evaluation approaches."""
+        # Define core evaluation types
+        evaluation_types = [
+            "factual_accuracy", 
+            "completeness", 
+            "logical_coherence", 
+            "user_alignment",
+            "citation_quality"
+        ]
+        
+        for eval_type in evaluation_types:
+            template = await self._generate_evaluation_template(eval_type)
+            self.evaluation_templates[eval_type] = template
+            
+    async def _generate_evaluation_template(self, evaluation_type):
+        """Generate an evaluation template for a specific evaluation type."""
+        prompt = f"""
+        Create a comprehensive evaluation template for assessing the {evaluation_type} of 
+        responses in a knowledge corpus research system.
+        
+        Design a template that specifies:
+        
+        1. Detailed description of what constitutes {evaluation_type} in this context
+        2. Specific evaluation criteria with scoring guidelines (0.0-1.0 scale)
+        3. Common issues to look for when evaluating {evaluation_type}
+        4. Response format structure for standardized evaluation output
+        
+        The template will be used by the system to consistently evaluate response quality
+        for the dimension of {evaluation_type}.
+        
+        Return the template as a structured JSON object.
+        """
+        
+        template_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            return json.loads(template_result)
+        except:
+            # Fallback basic template
+            return {
+                "evaluation_type": evaluation_type,
+                "criteria_description": f"Evaluate the {evaluation_type} of the response",
+                "scoring_guidelines": {"low": "0.0-0.3", "medium": "0.4-0.7", "high": "0.8-1.0"},
+                "response_format": {
+                    "score": "numeric value 0.0-1.0",
+                    "reasons": "list of specific observations",
+                    "suggestions": "list of improvement suggestions"
+                }
+            }
+            
+    def _get_evaluation_template(self, criteria):
+        """Get the appropriate evaluation template based on evaluation criteria."""
+        # Simple implementation - could be more sophisticated based on criteria combinations
+        if "accuracy" in criteria and "factual_accuracy" in self.evaluation_templates:
+            return self.evaluation_templates["factual_accuracy"]
+        
+        # Default template if none match
+        return {
+            "criteria_description": "\n".join([f"- {criterion}: How well the response performs on {criterion}" for criterion in criteria]),
+            "response_format": {
+                criterion: {
+                    "score": "numeric value 0.0-1.0",
+                    "reasons": "list of specific observations",
+                    "suggestions": "list of improvement suggestions"
+                } for criterion in criteria
+            }
+        }
+        
+    async def _load_improvement_strategies(self):
+        """Load response improvement strategies using LLM."""
+        # Define core improvement strategy types
+        strategy_types = [
+            "accuracy_enhancement", 
+            "completeness_improvement", 
+            "coherence_refinement", 
+            "relevance_focusing",
+            "citation_enhancement"
+        ]
+        
+        for strategy_type in strategy_types:
+            strategy = await self._generate_improvement_strategy(strategy_type)
+            self.improvement_strategies[strategy_type] = strategy
+            
+    async def _generate_improvement_strategy(self, strategy_type):
+        """Generate an improvement strategy for a specific aspect of response quality."""
+        prompt = f"""
+        Create a comprehensive improvement strategy for enhancing the {strategy_type} of 
+        responses in a knowledge corpus research system.
+        
+        Design a strategy that specifies:
+        
+        1. Detailed approach for improving {strategy_type} in responses
+        2. Step-by-step process for addressing common issues related to {strategy_type}
+        3. Examples of before/after improvements for {strategy_type}
+        4. Implementation guidelines for applying this strategy
+        
+        The strategy will be used by the system to systematically improve response quality
+        when evaluation identifies issues with {strategy_type}.
+        
+        Return the strategy as a structured JSON object.
+        """
+        
+        strategy_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        
+        try:
+            return json.loads(strategy_result)
+        except:
+            # Fallback basic strategy
+            return {
+                "strategy_type": strategy_type,
+                "description": f"Improve the {strategy_type} of the response",
+                "steps": [
+                    f"Review the response for {strategy_type} issues",
+                    "Identify specific problems in the original response",
+                    "Make targeted improvements while preserving correct content"
+                ]
+            }
+            
+    def _select_improvement_strategy(self, evaluation):
+        """Select the appropriate improvement strategy based on evaluation results."""
+        # Find the lowest scoring area
+        min_score = 1.0
+        weakest_area = "general"
+        
+        for criterion, details in evaluation.items():
+            if criterion in ["overall_score", "needs_improvement", "improvement_areas"]:
+                continue
+                
+            if isinstance(details, dict) and "score" in details:
+                score = details["score"]
+                if score < min_score:
+                    min_score = score
+                    weakest_area = criterion
+        
+        # Map criterion to strategy
+        strategy_mapping = {
+            "accuracy": "accuracy_enhancement",
+            "completeness": "completeness_improvement",
+            "coherence": "coherence_refinement",
+            "relevance": "relevance_focusing",
+            "citation_quality": "citation_enhancement"
+        }
+        
+        strategy_type = strategy_mapping.get(weakest_area, "general")
+        
+        # Return strategy if exists, otherwise return general guidance
+        if strategy_type in self.improvement_strategies:
+            return self.improvement_strategies[strategy_type]
+        else:
+            return {
+                "strategy_type": "general",
+                "description": "Improve overall response quality by fixing identified issues",
+                "steps": [
+                    "Address all issues identified in the evaluation",
+                    "Ensure factual accuracy based on knowledge context",
+                    "Improve completeness, coherence and relevance to the query"
+                ]
+            }
+```
+
+7.2 Self-Assessment Mechanisms
+
+The Response Generation System's self-assessment mechanism works through multiple evaluation dimensions:
+
+1. **Factual Accuracy Assessment**: Verifies that claims made in the response are supported by the knowledge context and correctly represent the source material.
+
+2. **Completeness Evaluation**: Analyzes whether the response addresses all aspects of the user's query and includes all relevant information available in the knowledge context.
+
+3. **Logical Coherence Check**: Ensures the response has a logical flow, consistent reasoning, and clear structure.
+
+4. **Citation and Evidence Review**: Confirms proper attribution of information to sources and appropriate use of citations.
+
+5. **Query Alignment Verification**: Checks that the response actually answers the specific question asked by the user.
+
+7.3 Self-Correction Process
+
+When a response fails to meet quality thresholds in any evaluation dimension, the system employs a structured approach to improve it:
+
+1. **Issue Identification**: The self-evaluation component pinpoints specific problems with the response.
+
+2. **Strategic Improvement**: Based on the nature of the issues identified, an appropriate improvement strategy is selected.
+
+3. **Targeted Revision**: The system generates an improved response that focuses on fixing the identified issues while preserving correct aspects of the original response.
+
+4. **Continuous Learning**: Response quality metrics and correction patterns are tracked to improve the response generation process over time.
+
+7.4 Dynamic Response Formatting
+
+The system dynamically adjusts its response format based on:
+
+1. **Query Type**: Factual queries receive direct, evidence-focused responses, while interpretive queries include multiple perspectives.
+
+2. **Detail Level**: The amount of detail is calibrated to the complexity of the query and user preferences.
+
+3. **Citation Style**: Citations can be incorporated inline or as references based on the response context.
+
+4. **Explanation Depth**: Technical depth is adjusted based on context clues about the user's expertise level.
+
+This self-evaluation and correction process ensures that users receive high-quality responses that accurately represent the information in the knowledge corpus, properly address their questions, and maintain a high standard of coherence and completeness.

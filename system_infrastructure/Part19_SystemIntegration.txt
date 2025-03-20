@@ -1,0 +1,238 @@
+9. System Integration and Application Setup
+async def build_and_initialize_system(input_folder="./input", output_folder="./output"):
+    """Build and initialize the complete knowledge corpus research system."""
+    import os
+    import time
+    import asyncio
+
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    print("Initializing resource monitor...")
+    resource_monitor = ResourceMonitor()
+
+    print("Initializing LLM service...")
+    llm_service = LLMService(resource_monitor=resource_monitor)
+
+    print("Initializing embedding service...")
+    embedding_service = EmbeddingService(resource_monitor=resource_monitor)
+
+    # Check if vector store already exists
+    vector_store_path = os.path.join(output_folder, "vector_store")
+    vector_store_exists = os.path.exists(vector_store_path)
+
+    if not vector_store_exists:
+        print("Processing documents...")
+        await process_documents(input_folder, output_folder, llm_service, embedding_service, resource_monitor)
+
+    # Load vector database
+    print("Loading vector database...")
+    vector_db = VectorDatabaseManager(vector_store_path)
+    vector_db.initialize()
+
+    # Initialize agent metadata manager
+    print("Initializing agent metadata manager...")
+    agent_metadata = AgentMetadataManager()
+
+    # Initialize orchestrator
+    print("Initializing orchestrator...")
+    orchestrator = DynamicOrchestrator(vector_db.db, llm_service, resource_monitor)
+    await orchestrator.initialize_system()
+
+    # Initialize parameter optimizer
+    print("Initializing parameter optimizer...")
+    parameter_optimizer = ParameterOptimizerAgent(llm_service, resource_monitor)
+
+    # Initialize research agent
+    print("Initializing research agent...")
+    research_agent = EnhancedResearchAgent(vector_db.db, llm_service, resource_monitor)
+    await research_agent.initialize()
+
+    # Initialize response generator
+    print("Initializing response generator...")
+    response_generator = EnhancedResponseGenerator(llm_service)
+    await response_generator.initialize()
+
+    # Initialize context engine
+    print("Initializing context engine...")
+    context_engine = ContextEngine(llm_service)
+
+    # Initialize data analysis agent
+    print("Initializing data analysis agent...")
+    data_analysis_agent = DataAnalysisAgent(vector_db.db, llm_service)
+    await data_analysis_agent.initialize()
+
+    # Register all agents with orchestrator
+    print("Registering agents with orchestrator...")
+    # (Orchestrator already initializes and registers core agents)
+
+    # Build system object with all components
+    system = {
+        "orchestrator": orchestrator,
+        "vector_db": vector_db,
+        "llm_service": llm_service,
+        "research_agent": research_agent,
+        "response_generator": response_generator,
+        "parameter_optimizer": parameter_optimizer,
+        "context_engine": context_engine,
+        "data_analysis_agent": data_analysis_agent,
+        "resource_monitor": resource_monitor,
+        "agent_metadata": agent_metadata
+    }
+
+    print("System initialization complete!")
+    return system
+
+async def process_documents(input_folder, output_folder, llm_service, embedding_service, resource_monitor):
+    """Process all documents in the input folder with dynamic analysis and metadata extraction."""
+    import os
+
+    start_time = time.time()
+
+    # Initialize metadata extractor
+    metadata_extractor = DynamicMetadataExtractor(llm_service)
+    await metadata_extractor.initialize()
+
+    # Initialize chunk processor
+    chunk_processor = ChunkProcessor(llm_service)
+
+    # Initialize multilevel chunk builder
+    chunk_builder = MultilevelChunkBuilder(llm_service)
+
+    # Discover all documents
+    documents = []
+    for root, _, files in os.walk(input_folder):
+        for filename in files:
+            if filename.endswith(('.txt', '.pdf', '.html', '.md', '.json', '.csv')):
+                file_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(file_path, input_folder)
+
+                documents.append({
+                    "path": file_path,
+                    "rel_path": rel_path,
+                    "name": filename
+                })
+
+    print(f"Found {len(documents)} documents")
+
+    # Process documents in batches
+    batch_size = 5
+    all_level0_chunks = []
+    document_analyses = []
+
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i+batch_size]
+
+        print(f"Processing document batch {i // batch_size + 1}/{(len(documents) + batch_size - 1) // batch_size}")
+
+        # Process each document in the batch
+        for doc in batch:
+            # Load document content
+            try:
+                with open(doc["path"], 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(doc["path"], 'r', encoding='latin-1') as f:
+                        content = f.read()
+                except:
+                    print(f"Error reading {doc['path']}, skipping")
+                    continue
+
+            # Extract metadata
+            doc_analysis = await metadata_extractor.extract_document_metadata(doc["path"], content)
+            document_analyses.append((doc, doc_analysis))
+
+            # Process document into chunks
+            doc_chunks = await chunk_processor.process_document(doc["path"], content, doc_analysis)
+            all_level0_chunks.extend(doc_chunks)
+
+            print(f"Created {len(doc_chunks)} Level 0 chunks for {doc['name']}")
+
+        # Allow system to catch up between batches
+        await asyncio.sleep(1)
+
+    print(f"Created total of {len(all_level0_chunks)} Level 0 chunks")
+
+    # Get model information for embedding
+    embedding_model_info = await embedding_service.get_model_info()
+
+    # Build multilevel chunks
+    print("Building multilevel chunks...")
+    all_chunks = await chunk_builder.build_multilevel_chunks(
+        all_level0_chunks,
+        embedding_model_info["max_tokens"]
+    )
+
+    # Count total chunks
+    total_chunks = sum(len(chunks) for level, chunks in all_chunks.items())
+    print(f"Created total of {total_chunks} chunks across {len(all_chunks)} levels")
+
+    # Flatten chunks for embedding
+    flat_chunks = []
+    for level_chunks in all_chunks.values():
+        flat_chunks.extend(level_chunks)
+
+    # Generate embeddings
+    print(f"Generating embeddings for {len(flat_chunks)} chunks...")
+
+    # Get system resource state for batch optimization
+    resources = resource_monitor.get_current_state()
+    optimizations = resource_monitor.optimize_resources()
+
+    embeddings = await embedding_service.embed_documents(
+        flat_chunks,
+        batch_size=optimizations.get("embedding_batch_size", 500),
+        optimize=True
+    )
+
+    print(f"Generated {len(embeddings)} embeddings")
+
+    # Initialize vector database
+    vector_store_path = os.path.join(output_folder, "vector_store")
+    vector_db = VectorDatabaseManager(vector_store_path)
+    vector_db.initialize()
+
+    # Convert chunks to documents and add to vector database
+    print("Adding documents to vector database...")
+    from langchain.schema import Document
+
+    # Prepare documents and embeddings lists
+    documents = []
+    embeddings_list = []
+    metadatas = []
+    ids = []
+
+    for chunk in flat_chunks:
+        chunk_id = chunk["id"]
+
+        # Skip if we don't have an embedding
+        if chunk_id not in embeddings:
+            continue
+
+        # Create Document
+        doc = Document(
+            page_content=chunk["text"],
+            metadata=chunk["metadata"]
+        )
+
+        documents.append(doc)
+        embeddings_list.append(embeddings[chunk_id])
+        metadatas.append(chunk["metadata"])
+        ids.append(chunk_id)
+
+    # Add documents in batches
+    batch_size = optimizations.get("processing_batch_size", 500)
+    for i in range(0, len(documents), batch_size):
+        end_idx = min(i + batch_size, len(documents))
+
+        vector_db.add_documents(
+            documents=documents[i:end_idx],
+            embeddings=embeddings_list[i:end_idx]
+        )
+
+        print(f"Added {end_idx}/{len(documents)} documents to vector database")
+
+    # Record completion time
+    end_time = time.time()
+    print(f"Document processing completed in {end_time - start_time:.2f} seconds")

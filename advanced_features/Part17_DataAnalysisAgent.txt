@@ -1,0 +1,952 @@
+8. Data Analysis Agent for Documents
+pythonCopyclass DataAnalysisAgent:
+    """
+    Specialized agent for analyzing and extracting insights from document collections,
+    with self-directed exploration capabilities.
+    """
+
+    def __init__(self, vector_db, llm_service=None):
+        self.vector_db = vector_db
+        self.llm_service = llm_service or LLMService()
+        self.analysis_memory = {}
+        self.insight_repository = {}
+        self.exploration_strategies = {}
+
+    async def initialize(self):
+        """Initialize the agent with exploration strategies."""
+        await self._generate_exploration_strategies()
+
+    async def _generate_exploration_strategies(self):
+        """Generate exploration strategies for different analysis goals."""
+        analysis_goals = [
+            "concept_mapping", "trend_analysis", "comparative_analysis",
+            "argument_extraction", "evidence_gathering", "narrative_analysis",
+            "perspective_identification", "methodology_mapping"
+        ]
+
+        for goal in analysis_goals:
+            strategy = await self._generate_strategy(goal)
+            self.exploration_strategies[goal] = strategy
+
+    async def _generate_strategy(self, analysis_goal):
+        """Generate an exploration strategy for a specific analysis goal."""
+        prompt = f"""
+        Create a comprehensive exploration strategy for {analysis_goal} in a knowledge corpus.
+
+        Design a strategy that specifies:
+
+        1. Key exploration patterns for {analysis_goal}
+        2. Search query formulation approach
+        3. Information relationship mapping
+        4. Progressive discovery process
+        5. Insight aggregation methodology
+        6. Verification and cross-checking procedures
+
+        The strategy should enable systematic exploration of the knowledge corpus
+        to achieve {analysis_goal} with minimal query iterations.
+
+        Return the strategy as a structured JSON object.
+        """
+
+        strategy_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(strategy_result)
+        except:
+            # Fallback basic strategy
+            return {
+                "analysis_goal": analysis_goal,
+                "search_patterns": ["direct_queries", "related_concept_exploration"],
+                "relationship_mapping": "concept_linking",
+                "discovery_process": ["initial_exploration", "targeted_investigation", "synthesis"],
+                "verification_approach": "cross_reference"
+            }
+
+    async def analyze_topic(self, topic, analysis_goals=None, initial_params=None):
+        """
+        Conduct a comprehensive analysis of a topic in the knowledge corpus.
+
+        Args:
+            topic: Topic to analyze
+            analysis_goals: Specific analysis goals (defaults to concept_mapping if None)
+            initial_params: Optional initial parameters
+
+        Returns:
+            Analysis results with insights and supporting evidence
+        """
+        # Generate a unique ID for this analysis
+        analysis_id = f"analysis_{int(time.time())}"
+
+        # Set default analysis goals if none provided
+        if not analysis_goals:
+            analysis_goals = ["concept_mapping"]
+
+        # Create analysis plan
+        analysis_plan = await self._create_analysis_plan(topic, analysis_goals, initial_params)
+
+        # Initialize analysis session
+        self.analysis_memory[analysis_id] = {
+            "topic": topic,
+            "analysis_goals": analysis_goals,
+            "plan": analysis_plan,
+            "execution_log": [],
+            "discovered_concepts": set(),
+            "evidence": {},
+            "insights": [],
+            "start_time": time.time()
+        }
+
+        # Execute analysis plan
+        for step in analysis_plan["steps"]:
+            step_result = await self._execute_analysis_step(analysis_id, step)
+            self.analysis_memory[analysis_id]["execution_log"].append({
+                "step": step,
+                "result": step_result
+            })
+
+            # Break if step indicates analysis should end
+            if step_result.get("should_end_analysis", False):
+                break
+
+        # Synthesize insights
+        synthesis = await self._synthesize_analysis(analysis_id)
+        self.analysis_memory[analysis_id]["synthesis"] = synthesis
+
+        # Prepare final results
+        results = self._prepare_analysis_results(analysis_id)
+
+        # Store important insights in repository
+        self._update_insight_repository(topic, results)
+
+        return results
+
+    async def _create_analysis_plan(self, topic, analysis_goals, initial_params=None):
+        """Create a comprehensive analysis plan."""
+        # Get strategies for selected goals
+        strategies = []
+        for goal in analysis_goals:
+            if goal in self.exploration_strategies:
+                strategies.append(self.exploration_strategies[goal])
+
+        # Format strategies for prompt
+        strategies_str = json.dumps(strategies, indent=2) if strategies else "No predefined strategies available."
+
+        prompt = f"""
+        Create a comprehensive analysis plan for exploring the topic "{topic}" in a knowledge corpus.
+
+        ANALYSIS GOALS:
+        {', '.join(analysis_goals)}
+
+        AVAILABLE STRATEGIES:
+        {strategies_str}
+
+        Design a step-by-step analysis plan that:
+        1. Begins with broad exploration of the main topic
+        2. Progressively narrows and deepens investigation
+        3. Maps relationships between discovered concepts
+        4. Validates findings through cross-referencing
+        5. Synthesizes insights across the knowledge corpus
+
+        Each step should specify:
+        - The specific search or analysis action to perform
+        - Parameters for that action (search terms, filters, etc.)
+        - The expected information to gather
+        - Criteria for evaluating results
+        - Decision points for the next steps
+
+        Return the plan as a structured JSON object with clear, executable steps.
+        """
+
+        plan_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            plan = json.loads(plan_result)
+
+            # Apply initial params if provided
+            if initial_params:
+                # Merge parameters
+                if "parameters" in plan and isinstance(plan["parameters"], dict):
+                    plan["parameters"].update(initial_params)
+                else:
+                    plan["parameters"] = initial_params
+
+            return plan
+
+        except:
+            # Fallback basic plan
+            return {
+                "topic": topic,
+                "goals": analysis_goals,
+                "steps": [
+                    {
+                        "step_id": 1,
+                        "action": "search",
+                        "query": topic,
+                        "parameters": {"top_k": 10}
+                    },
+                    {
+                        "step_id": 2,
+                        "action": "extract_concepts",
+                        "from_results": True
+                    },
+                    {
+                        "step_id": 3,
+                        "action": "search_concepts",
+                        "parameters": {"top_k": 5}
+                    },
+                    {
+                        "step_id": 4,
+                        "action": "synthesize_insights"
+                    }
+                ]
+            }
+
+    async def _execute_analysis_step(self, analysis_id, step):
+        """Execute a single analysis step."""
+        if analysis_id not in self.analysis_memory:
+            return {"error": "Analysis session not found"}
+
+        session = self.analysis_memory[analysis_id]
+
+        # Execute based on action type
+        action = step.get("action", "").lower()
+
+        if action == "search":
+            return await self._execute_search_action(session, step)
+
+        elif action == "extract_concepts":
+            return await self._execute_concept_extraction(session, step)
+
+        elif action == "search_concepts":
+            return await self._execute_concept_search(session, step)
+
+        elif action == "map_relationships":
+            return await self._execute_relationship_mapping(session, step)
+
+        elif action == "validate_findings":
+            return await self._execute_validation(session, step)
+
+        elif action == "synthesize_insights":
+            return await self._execute_insight_synthesis(session, step)
+
+        else:
+            return {
+                "error": f"Unknown action type: {action}",
+                "status": "failed"
+            }
+
+    async def _execute_search_action(self, session, step):
+        """Execute a search action within analysis."""
+        # Get query and parameters
+        query = step.get("query", session["topic"])
+        parameters = step.get("parameters", {})
+
+        # Execute search
+        try:
+            results = await self.vector_db.similarity_search(
+                query=query,
+                top_k=parameters.get("top_k", 10),
+                threshold=parameters.get("threshold", 0.7),
+                filter_dict=parameters.get("filters")
+            )
+
+            # Process results
+            processed_results = []
+            for result in results:
+                # Add to evidence repository
+                chunk_id = result.metadata.get("chunk_id", str(uuid.uuid4()))
+                session["evidence"][chunk_id] = {
+                    "content": result.page_content,
+                    "metadata": result.metadata,
+                    "found_in_step": step.get("step_id", 0),
+                    "query": query
+                }
+
+                # Add to processed results
+                processed_results.append({
+                    "chunk_id": chunk_id,
+                    "content_preview": result.page_content[:200],
+                    "metadata": {k: v for k, v in result.metadata.items() if k != "chunk_id"}
+                })
+
+            return {
+                "status": "success",
+                "query": query,
+                "results_count": len(results),
+                "results_preview": processed_results
+            }
+
+        except Exception as e:
+            return {
+                "status": "failed",
+                "error": str(e)
+            }
+
+    async def _execute_concept_extraction(self, session, step):
+        """Extract concepts from previously found evidence."""
+        # Determine source of content for extraction
+        evidence_dict = session["evidence"]
+
+        if step.get("from_results", True) and evidence_dict:
+            # Concatenate evidence for analysis
+            content = ""
+            for chunk_id, evidence in list(evidence_dict.items())[:10]:  # Limit to most recent 10
+                content += f"{evidence['content']}\n\n"
+
+            # Create extraction prompt
+            prompt = f"""
+            Analyze this content and extract key concepts related to the topic "{session['topic']}".
+
+            CONTENT:
+            {content[:4000]}  # Limit to 4000 chars
+
+            Extract:
+            1. Main concepts directly related to the topic
+            2. Secondary concepts that are connected to main concepts
+            3. Terminology and definitions specific to this domain
+            4. Evidence relationships between concepts
+
+            For each concept, provide:
+            - The concept name
+            - A brief description based on the content
+            - Supporting evidence from the content
+            - Relationships to other concepts (if present)
+
+            Return your extraction as a structured JSON object.
+            """
+
+            extraction_result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+
+            try:
+                extraction = json.loads(extraction_result)
+
+                # Update discovered concepts
+                if "concepts" in extraction:
+                    for concept in extraction["concepts"]:
+                        concept_name = concept.get("name", "")
+                        if concept_name:
+                            session["discovered_concepts"].add(concept_name)
+
+                return {
+                    "status": "success",
+                    "extraction": extraction,
+                    "concepts_found": len(extraction.get("concepts", []))
+                }
+
+            except:
+                return {
+                    "status": "partial_success",
+                    "error": "Failed to parse extraction result",
+                    "raw_extraction": extraction_result[:200]
+                }
+        else:
+            return {
+                "status": "failed",
+                "error": "No evidence available for concept extraction"
+            }
+
+    async def _execute_concept_search(self, session, step):
+        """Search for discovered concepts to gather more evidence."""
+        discovered_concepts = list(session["discovered_concepts"])
+
+        if not discovered_concepts:
+            return {
+                "status": "skipped",
+                "reason": "No concepts discovered for searching",
+                "should_end_analysis": False
+            }
+
+        # Limit to most promising concepts if many discovered
+        if len(discovered_concepts) > 5:
+            # Create concept prioritization prompt
+            concept_list = ", ".join(discovered_concepts)
+
+            prompt = f"""
+            From these concepts related to "{session['topic']}", identify the 5 most important
+            for deeper investigation.
+
+            CONCEPTS:
+            {concept_list}
+
+            Select the 5 concepts that:
+            1. Are most central to understanding the topic
+            2. Represent diverse aspects of the topic
+            3. Would yield the most valuable insights if investigated further
+
+            Return a JSON array of just the 5 concept names, no additional text.
+            """
+
+            priority_result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+
+            try:
+                priority_concepts = json.loads(priority_result)
+                if isinstance(priority_concepts, list) and len(priority_concepts) <= 5:
+                    concepts_to_search = priority_concepts
+                else:
+                    concepts_to_search = discovered_concepts[:5]
+            except:
+                concepts_to_search = discovered_concepts[:5]
+        else:
+            concepts_to_search = discovered_concepts
+
+        # Search for each concept
+        results = {}
+        parameters = step.get("parameters", {})
+
+        for concept in concepts_to_search:
+            # Formulate query that includes original topic
+            query = f"{concept} {session['topic']}"
+
+            # Execute search
+            try:
+                concept_results = await self.vector_db.similarity_search(
+                    query=query,
+                    top_k=parameters.get("top_k", 5),
+                    threshold=parameters.get("threshold", 0.7)
+                )
+
+                # Process and store results
+                processed_results = []
+                for result in concept_results:
+                    # Add to evidence repository
+                    chunk_id = result.metadata.get("chunk_id", str(uuid.uuid4()))
+                    session["evidence"][chunk_id] = {
+                        "content": result.page_content,
+                        "metadata": result.metadata,
+                        "found_in_step": step.get("step_id", 0),
+                        "query": query,
+                        "concept": concept
+                    }
+
+                    # Add to processed results
+                    processed_results.append({
+                        "chunk_id": chunk_id,
+                        "content_preview": result.page_content[:200],
+                        "metadata": {k: v for k, v in result.metadata.items() if k != "chunk_id"}
+                    })
+
+                results[concept] = {
+                    "status": "success",
+                    "results_count": len(concept_results),
+                    "results_preview": processed_results
+                }
+
+            except Exception as e:
+                results[concept] = {
+                    "status": "failed",
+                    "error": str(e)
+                }
+
+        return {
+            "status": "success",
+            "concepts_searched": len(results),
+            "concept_results": results,
+            "should_end_analysis": False
+        }
+
+    async def _execute_relationship_mapping(self, session, step):
+        """Map relationships between concepts based on evidence."""
+        discovered_concepts = list(session["discovered_concepts"])
+        evidence_dict = session["evidence"]
+
+        if not discovered_concepts or len(discovered_concepts) < 2:
+            return {
+                "status": "skipped",
+                "reason": "Not enough concepts for relationship mapping",
+                "should_end_analysis": False
+            }
+
+        if not evidence_dict:
+            return {
+                "status": "skipped",
+                "reason": "No evidence available for relationship mapping",
+                "should_end_analysis": False
+            }
+
+        # Collect evidence for concepts
+        concept_evidence = {}
+        for chunk_id, evidence in evidence_dict.items():
+            # Check which concepts appear in this evidence
+            content = evidence["content"].lower()
+            for concept in discovered_concepts:
+                if concept.lower() in content:
+                    if concept not in concept_evidence:
+                        concept_evidence[concept] = []
+                    concept_evidence[concept].append({
+                        "chunk_id": chunk_id,
+                        "content": evidence["content"],
+                        "metadata": evidence["metadata"]
+                    })
+
+        # Filter concepts with enough evidence
+        concepts_with_evidence = [c for c in concept_evidence if len(concept_evidence[c]) > 0]
+
+        if len(concepts_with_evidence) < 2:
+            return {
+                "status": "skipped",
+                "reason": "Not enough concepts with evidence for relationship mapping",
+                "should_end_analysis": False
+            }
+
+        # Create relationship mapping prompt
+        concepts_str = ", ".join(concepts_with_evidence)
+
+        # Format evidence for each concept (limited to keep prompt size reasonable)
+        evidence_str = ""
+        for concept in concepts_with_evidence[:5]:  # Limit to 5 concepts
+            evidence_str += f"EVIDENCE FOR '{concept}':\n"
+            for i, evid in enumerate(concept_evidence[concept][:2]):  # Limit to 2 pieces of evidence per concept
+                evidence_str += f"[{i+1}] {evid['content'][:300]}...\n\n"
+
+        prompt = f"""
+        Map relationships between these concepts related to "{session['topic']}" based on the evidence.
+
+        CONCEPTS:
+        {concepts_str}
+
+        EVIDENCE:
+        {evidence_str}
+
+        Identify relationships between concepts, such as:
+        - Hierarchical relationships (is a type of, is part of)
+        - Causal relationships (causes, influences, prevents)
+        - Temporal relationships (precedes, follows, during)
+        - Functional relationships (serves as, enables, supports)
+        - Contrastive relationships (opposes, contradicts, differs from)
+
+        For each relationship, provide:
+        - The two concepts being related
+        - The nature of the relationship
+        - Supporting evidence from the text
+        - Confidence level (high, medium, low)
+
+        Return the relationship map as a structured JSON object.
+        """
+
+        mapping_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            relationships = json.loads(mapping_result)
+
+            return {
+                "status": "success",
+                "relationships": relationships,
+                "concepts_mapped": len(concepts_with_evidence),
+                "should_end_analysis": False
+            }
+
+        except:
+            return {
+                "status": "partial_success",
+                "error": "Failed to parse relationship mapping result",
+                "raw_mapping": mapping_result[:200],
+                "should_end_analysis": False
+            }
+
+    async def _execute_validation(self, session, step):
+        """Validate findings through cross-referencing and verification."""
+        # Check if we have insights to validate
+        if not session.get("insights"):
+            return {
+                "status": "skipped",
+                "reason": "No insights available for validation",
+                "should_end_analysis": False
+            }
+
+        insights = session["insights"]
+        evidence_dict = session["evidence"]
+
+        # Choose insights to validate (prioritize those with lower confidence)
+        insights_to_validate = sorted(insights, key=lambda x: x.get("confidence", 0.5))[:5]
+
+        validation_results = []
+        for insight in insights_to_validate:
+            # Create validation prompt
+            prompt = f"""
+            Validate the following insight about "{session['topic']}" against the evidence.
+
+            INSIGHT:
+            {insight.get('statement', 'No statement provided')}
+
+            VALIDATION CRITERIA:
+            - Factual accuracy: Does the evidence support the factual claims?
+            - Completeness: Does the insight represent the full picture from the evidence?
+            - Nuance: Does the insight capture important distinctions or qualifications?
+            - Balance: Does the insight consider multiple perspectives if present in evidence?
+
+            EVIDENCE:
+            """
+
+            # Add supporting evidence
+            supporting_evidence_ids = insight.get("supporting_evidence", [])
+            for i, evidence_id in enumerate(supporting_evidence_ids):
+                if evidence_id in evidence_dict:
+                    evidence = evidence_dict[evidence_id]
+                    prompt += f"[{i+1}] {evidence['content'][:300]}...\n\n"
+
+            # Add random other evidence for cross-validation
+            other_evidence_ids = [e_id for e_id in evidence_dict if e_id not in supporting_evidence_ids]
+            random.shuffle(other_evidence_ids)
+            for i, evidence_id in enumerate(other_evidence_ids[:3]):  # Add up to 3 random pieces
+                evidence = evidence_dict[evidence_id]
+                prompt += f"[Random {i+1}] {evidence['content'][:300]}...\n\n"
+
+            prompt += """
+            Provide a detailed validation assessment including:
+            - Validation score (0-10) for each criterion
+            - Overall validation score (0-10)
+            - Specific evidence that supports or contradicts the insight
+            - Suggested revisions to improve accuracy or completeness
+
+            Return your assessment as a structured JSON object.
+            """
+
+            validation_result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+
+            try:
+                validation = json.loads(validation_result)
+
+                # Add to validation results
+                validation_results.append({
+                    "insight": insight.get("statement", "No statement provided"),
+                    "validation": validation,
+                    "insight_id": insight.get("id", "unknown")
+                })
+
+                # Update insight confidence if overall score is provided
+                if "overall_score" in validation:
+                    for i, orig_insight in enumerate(session["insights"]):
+                        if orig_insight.get("id") == insight.get("id"):
+                            session["insights"][i]["validation_score"] = validation["overall_score"]
+                            session["insights"][i]["confidence"] = max(0.1, min(1.0, validation["overall_score"] / 10))
+
+            except:
+                validation_results.append({
+                    "insight": insight.get("statement", "No statement provided"),
+                    "error": "Failed to parse validation result",
+                    "insight_id": insight.get("id", "unknown")
+                })
+
+        return {
+            "status": "success",
+            "validation_results": validation_results,
+            "insights_validated": len(validation_results),
+            "should_end_analysis": False
+        }
+
+    async def _execute_insight_synthesis(self, session, step):
+        """Synthesize insights from gathered evidence and concept relationships."""
+        evidence_dict = session["evidence"]
+        discovered_concepts = list(session["discovered_concepts"])
+
+        if not evidence_dict:
+            return {
+                "status": "failed",
+                "reason": "No evidence available for insight synthesis",
+                "should_end_analysis": True
+            }
+
+        # Get previous relationship mapping if available
+        relationship_mapping = None
+        for log_entry in session["execution_log"]:
+            if log_entry["step"].get("action") == "map_relationships" and log_entry["result"].get("status") == "success":
+                relationship_mapping = log_entry["result"].get("relationships")
+                break
+
+        # Format evidence for synthesis (sample from different queries/concepts)
+        evidence_by_concept = {}
+        evidence_by_query = {}
+
+        for chunk_id, evidence in evidence_dict.items():
+            # Organize by concept
+            concept = evidence.get("concept")
+            if concept:
+                if concept not in evidence_by_concept:
+                    evidence_by_concept[concept] = []
+                evidence_by_concept[concept].append(evidence)
+
+            # Organize by query
+            query = evidence.get("query")
+            if query:
+                if query not in evidence_by_query:
+                    evidence_by_query[query] = []
+                evidence_by_query[query].append(evidence)
+
+        # Sample evidence to include in prompt
+        sampled_evidence = []
+
+        # First, include evidence from each concept
+        for concept, evidence_list in evidence_by_concept.items():
+            if evidence_list:
+                sampled_evidence.append(random.choice(evidence_list))
+
+        # Then, include evidence from different queries if not already included
+        for query, evidence_list in evidence_by_query.items():
+            if len(sampled_evidence) >= 15:  # Limit to keep prompt size reasonable
+                break
+
+            candidate = random.choice(evidence_list)
+            if candidate not in sampled_evidence:
+                sampled_evidence.append(candidate)
+
+        # Format evidence for prompt
+        evidence_str = ""
+        for i, evidence in enumerate(sampled_evidence[:15]):  # Limit to 15 pieces
+            evidence_str += f"[{i+1}] "
+            if "concept" in evidence:
+                evidence_str += f"[Concept: {evidence['concept']}] "
+            evidence_str += f"{evidence['content'][:250]}...\n\n"
+
+        # Create synthesis prompt
+        prompt = f"""
+        Synthesize insights about "{session['topic']}" based on the evidence and discovered concepts.
+
+        TOPIC: {session['topic']}
+
+        DISCOVERED CONCEPTS:
+        {', '.join(discovered_concepts)}
+
+        EVIDENCE SAMPLES:
+        {evidence_str}
+
+        ANALYSIS GOALS:
+        {', '.join(session['analysis_goals'])}
+
+        Based on all information gathered, generate:
+
+        1. Key insights about the topic (5-7 insights)
+        2. How concepts relate to form a coherent understanding
+        3. Areas of consensus across different sources
+        4. Areas of disagreement or uncertainty
+        5. Implications or applications of these insights
+        6. Gaps in the current understanding
+
+        For each insight, provide:
+        - A clear statement of the insight
+        - Supporting concepts and evidence
+        - Confidence level (high, medium, low)
+        - Limitations or qualifications
+
+        Return your synthesis as a structured JSON object.
+        """
+
+        # Include relationship mapping if available
+        if relationship_mapping:
+            prompt += f"\n\nRELATIONSHIP MAPPING:\n{json.dumps(relationship_mapping, indent=2)}"
+
+        synthesis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            synthesis = json.loads(synthesis_result)
+
+            # Extract insights and add IDs
+            if "insights" in synthesis:
+                for i, insight in enumerate(synthesis["insights"]):
+                    insight["id"] = f"insight_{i}_{int(time.time())}"
+
+                    # Convert text confidence to numeric
+                    confidence_text = insight.get("confidence", "medium").lower()
+                    if confidence_text == "high":
+                        insight["confidence"] = 0.9
+                    elif confidence_text == "medium":
+                        insight["confidence"] = 0.7
+                    elif confidence_text == "low":
+                        insight["confidence"] = 0.5
+                    else:
+                        insight["confidence"] = 0.6
+
+                # Update session insights
+                session["insights"] = synthesis["insights"]
+
+            return {
+                "status": "success",
+                "synthesis": synthesis,
+                "insights_generated": len(synthesis.get("insights", [])),
+                "should_end_analysis": True
+            }
+
+        except:
+            return {
+                "status": "partial_success",
+                "error": "Failed to parse synthesis result",
+                "raw_synthesis": synthesis_result[:200],
+                "should_end_analysis": True
+            }
+
+    async def _synthesize_analysis(self, analysis_id):
+        """Create a comprehensive synthesis of the entire analysis."""
+        if analysis_id not in self.analysis_memory:
+            return {"error": "Analysis session not found"}
+
+        session = self.analysis_memory[analysis_id]
+
+        # Check if we already have insights
+        insights = session.get("insights", [])
+
+        # Create synthesis prompt
+        prompt = f"""
+        Create a comprehensive synthesis of the analysis on "{session['topic']}".
+
+        TOPIC: {session['topic']}
+
+        ANALYSIS GOALS:
+        {', '.join(session['analysis_goals'])}
+
+        DISCOVERED CONCEPTS:
+        {', '.join(list(session['discovered_concepts'])[:20])}  # Limit to 20
+
+        INSIGHTS:
+        """
+
+        # Add insights
+        for i, insight in enumerate(insights):
+            confidence = insight.get("confidence", 0.7)
+            confidence_text = "high" if confidence > 0.8 else "medium" if confidence > 0.5 else "low"
+
+            prompt += f"[{i+1}] {insight.get('statement', 'No statement provided')} "
+            prompt += f"(Confidence: {confidence_text})\n"
+
+            # Add support or limitations if available
+            if "supporting_evidence" in insight:
+                prompt += f"- Support: {insight.get('supporting_evidence', 'Not specified')}\n"
+            if "limitations" in insight:
+                prompt += f"- Limitations: {insight.get('limitations', 'Not specified')}\n"
+
+            prompt += "\n"
+
+        prompt += """
+        Create a comprehensive synthesis that:
+
+        1. Presents a cohesive narrative about the topic
+        2. Organizes insights into a logical structure
+        3. Highlights key findings and their significance
+        4. Addresses areas of certainty and uncertainty
+        5. Identifies connections between different concepts
+        6. Suggests implications and applications
+        7. Recommends areas for further exploration
+
+        The synthesis should integrate all insights into a coherent whole
+        while acknowledging limitations in the current understanding.
+
+        Return your synthesis as a structured JSON object.
+        """
+
+        synthesis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.4,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(synthesis_result)
+        except:
+            # Fallback basic synthesis
+            return {
+                "narrative": f"Analysis of {session['topic']} revealed several insights but synthesis failed.",
+                "key_findings": [i.get("statement", "Unnamed insight") for i in insights[:5]],
+                "synthesis_error": "Failed to parse synthesis result"
+            }
+
+    def _prepare_analysis_results(self, analysis_id):
+        """Prepare final analysis results."""
+        if analysis_id not in self.analysis_memory:
+            return {"error": "Analysis session not found"}
+
+        session = self.analysis_memory[analysis_id]
+
+        # Calculate execution time
+        execution_time = time.time() - session["start_time"]
+
+        # Count unique evidence sources
+        evidence_sources = set()
+        for evidence in session["evidence"].values():
+            if "metadata" in evidence and "document_name" in evidence["metadata"]:
+                evidence_sources.add(evidence["metadata"]["document_name"])
+
+        # Prepare results
+        results = {
+            "analysis_id": analysis_id,
+            "topic": session["topic"],
+            "analysis_goals": session["analysis_goals"],
+            "execution_time": execution_time,
+            "concepts_discovered": list(session["discovered_concepts"]),
+            "evidence_count": len(session["evidence"]),
+            "unique_sources": len(evidence_sources),
+            "insights": session.get("insights", []),
+            "synthesis": session.get("synthesis", {})
+        }
+
+        return results
+
+    def _update_insight_repository(self, topic, results):
+        """Update insight repository with key findings."""
+        # Clean topic for storage
+        clean_topic = topic.lower().strip()
+
+        # Get insights
+        insights = results.get("insights", [])
+        if not insights:
+            return
+
+        # Filter to high-confidence insights
+        high_confidence_insights = [
+            insight for insight in insights
+            if insight.get("confidence", 0) > 0.7 or insight.get("validation_score", 0) > 7
+        ]
+
+        # Update repository
+        if clean_topic not in self.insight_repository:
+            self.insight_repository[clean_topic] = {
+                "last_updated": time.time(),
+                "insights": high_confidence_insights,
+                "related_concepts": results.get("concepts_discovered", [])[:10],
+                "analysis_count": 1
+            }
+        else:
+            # Merge with existing insights
+            existing = self.insight_repository[clean_topic]
+
+            # Update metadata
+            existing["last_updated"] = time.time()
+            existing["analysis_count"] += 1
+
+            # Merge concepts
+            existing_concepts = set(existing["related_concepts"])
+            new_concepts = set(results.get("concepts_discovered", [])[:10])
+            existing["related_concepts"] = list(existing_concepts.union(new_concepts))
+
+            # Merge insights (avoid duplicates)
+            existing_statements = {i.get("statement") for i in existing["insights"]}
+            for insight in high_confidence_insights:
+                if insight.get("statement") not in existing_statements:
+                    existing["insights"].append(insight)
+                    existing_statements.add(insight.get("statement"))
+        }

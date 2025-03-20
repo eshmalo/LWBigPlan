@@ -1,0 +1,118 @@
+8. Resource Monitoring System
+
+```python
+class ResourceMonitor:
+    """
+    Monitors system resources and provides feedback for dynamic resource allocation.
+    """
+
+    def __init__(self):
+        self.history = []
+        self.warning_thresholds = {
+            "cpu": 85,  # Percentage
+            "memory": 80,  # Percentage
+            "embedding_tpm": 4000000,  # Tokens per minute (out of 5M limit)
+            "api_rpm": 8000  # Requests per minute (out of 10K limit)
+        }
+        self.start_time = time.time()
+
+    def get_current_state(self):
+        """Get current system resource state."""
+        import psutil
+
+        # Get CPU and memory usage
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+
+        # Calculate API usage rates based on history
+        current_minute = int((time.time() - self.start_time) / 60)
+        recent_api_calls = [
+            entry for entry in self.history
+            if entry["type"] == "api_call" and entry["minute"] == current_minute
+        ]
+
+        recent_tokens = sum(entry.get("tokens", 0) for entry in recent_api_calls)
+
+        # Calculate available resources
+        state = {
+            "cpu_usage": cpu_percent,
+            "cpu_available": 100 - cpu_percent,
+            "memory_usage": memory.percent,
+            "memory_available": 100 - memory.percent,
+            "tokens_used_this_minute": recent_tokens,
+            "tokens_available": self.warning_thresholds["embedding_tpm"] - recent_tokens,
+            "api_calls_this_minute": len(recent_api_calls),
+            "api_calls_available": self.warning_thresholds["api_rpm"] - len(recent_api_calls)
+        }
+
+        # Add warnings if thresholds are approached
+        state["warnings"] = []
+
+        if state["cpu_usage"] > self.warning_thresholds["cpu"]:
+            state["warnings"].append("CPU usage critical")
+
+        if state["memory_usage"] > self.warning_thresholds["memory"]:
+            state["warnings"].append("Memory usage critical")
+
+        if state["tokens_used_this_minute"] > self.warning_thresholds["embedding_tpm"] * 0.9:
+            state["warnings"].append("Approaching embedding TPM limit")
+
+        if state["api_calls_this_minute"] > self.warning_thresholds["api_rpm"] * 0.9:
+            state["warnings"].append("Approaching API RPM limit")
+
+        # Record current state in history
+        self.history.append({
+            "timestamp": time.time(),
+            "minute": current_minute,
+            "type": "system_state",
+            "state": state
+        })
+
+        return state
+
+    def record_api_call(self, api_type, tokens=0, latency=0):
+        """Record an API call for rate monitoring."""
+        current_minute = int((time.time() - self.start_time) / 60)
+
+        self.history.append({
+            "timestamp": time.time(),
+            "minute": current_minute,
+            "type": "api_call",
+            "api_type": api_type,
+            "tokens": tokens,
+            "latency": latency
+        })
+
+    def optimize_resources(self):
+        """Suggest resource optimizations based on current state."""
+        state = self.get_current_state()
+        optimizations = {}
+
+        # Optimize batch sizes based on current usage
+        if state["cpu_available"] < 20 or state["memory_available"] < 20:
+            # System under heavy load, reduce batch sizes
+            optimizations["embedding_batch_size"] = 100
+            optimizations["processing_batch_size"] = 5
+            optimizations["max_parallel_processes"] = 4
+        elif state["cpu_available"] > 50 and state["memory_available"] > 50:
+            # System has plenty of resources, increase throughput
+            optimizations["embedding_batch_size"] = 1000
+            optimizations["processing_batch_size"] = 20
+            optimizations["max_parallel_processes"] = 12
+        else:
+            # Moderate resource availability
+            optimizations["embedding_batch_size"] = 500
+            optimizations["processing_batch_size"] = 10
+            optimizations["max_parallel_processes"] = 8
+
+        # Adjust API call strategies based on rate limits
+        if state["tokens_available"] < 1000000 or state["api_calls_available"] < 2000:
+            # Approaching rate limits, implement throttling
+            optimizations["throttle_embeddings"] = True
+            optimizations["min_time_between_calls"] = 0.1  # seconds
+        else:
+            optimizations["throttle_embeddings"] = False
+            optimizations["min_time_between_calls"] = 0
+
+        return optimizations
+```

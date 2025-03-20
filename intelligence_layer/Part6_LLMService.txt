@@ -1,0 +1,237 @@
+7. LLM Service Implementation
+pythonCopyclass LLMService:
+    """
+    Service for interfacing with LLMs, with note-taking capabilities.
+    """
+
+    def __init__(self, default_model="gpt-4", resource_monitor=None):
+        self.default_model = default_model
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+        self.call_history = []
+        self.notes = {}
+
+    async def generate_completion(self, prompt, model=None, temperature=0.7, max_tokens=None,
+                               response_format=None, note_id=None):
+        """Generate a completion from the LLM."""
+        # Import OpenAI client
+        from openai import AsyncOpenAI
+
+        # Record call start time
+        start_time = time.time()
+
+        # Use default model if not specified
+        model = model or self.default_model
+
+        # Check resource monitor for rate limits
+        if self.resource_monitor:
+            resources = self.resource_monitor.get_current_state()
+            if resources.get("warnings"):
+                # If approaching rate limits, use less capable but faster model
+                if "Approaching API RPM limit" in resources["warnings"]:
+                    model = model.replace("gpt-4", "gpt-3.5-turbo")
+
+        # Configure request parameters
+        params = {
+            "model": model,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+
+        if max_tokens:
+            params["max_tokens"] = max_tokens
+
+        if response_format:
+            params["response_format"] = response_format
+
+        # Create OpenAI client
+        client = AsyncOpenAI()
+
+        # Generate completion
+        try:
+            response = await client.chat.completions.create(**params)
+
+            # Extract response text
+            completion_text = response.choices[0].message.content
+
+            # Record completion time
+            end_time = time.time()
+            latency = (end_time - start_time) * 1000
+
+            # Record API call
+            if self.resource_monitor:
+                self.resource_monitor.record_api_call(
+                    api_type="completion",
+                    tokens=response.usage.total_tokens,
+                    latency=latency
+                )
+
+            # Record call in history
+            call_record = {
+                "timestamp": end_time,
+                "model": model,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "latency_ms": latency,
+                "success": True
+            }
+
+            self.call_history.append(call_record)
+
+            # Check if this is a JSON response and contains notes
+            if response_format and response_format.get("type") == "json_object":
+                try:
+                    content = json.loads(completion_text)
+                    if "notes" in content and note_id:
+                        self.notes[note_id] = content["notes"]
+                except:
+                    pass
+
+            return completion_text
+
+        except Exception as e:
+            # Record error
+            end_time = time.time()
+            latency = (end_time - start_time) * 1000
+
+            call_record = {
+                "timestamp": end_time,
+                "model": model,
+                "error": str(e),
+                "latency_ms": latency,
+                "success": False
+            }
+
+            self.call_history.append(call_record)
+
+            # Add note about error
+            if note_id:
+                self.notes[f"{note_id}_error"] = f"Error generating completion: {str(e)}"
+
+            # Fallback to simpler model if this was a capacity error
+            if "capacity" in str(e).lower() and "gpt-4" in model:
+                return await self.generate_completion(
+                    prompt=prompt,
+                    model="gpt-3.5-turbo",
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    note_id=note_id
+                )
+
+            # Re-raise error
+            raise
+8. Resource Monitoring System
+pythonCopyclass ResourceMonitor:
+    """
+    Monitors system resources and provides feedback for dynamic resource allocation.
+    """
+
+    def __init__(self):
+        self.history = []
+        self.warning_thresholds = {
+            "cpu": 85,  # Percentage
+            "memory": 80,  # Percentage
+            "embedding_tpm": 4000000,  # Tokens per minute (out of 5M limit)
+            "api_rpm": 8000  # Requests per minute (out of 10K limit)
+        }
+        self.start_time = time.time()
+
+    def get_current_state(self):
+        """Get current system resource state."""
+        import psutil
+
+        # Get CPU and memory usage
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+
+        # Calculate API usage rates based on history
+        current_minute = int((time.time() - self.start_time) / 60)
+        recent_api_calls = [
+            entry for entry in self.history
+            if entry["type"] == "api_call" and entry["minute"] == current_minute
+        ]
+
+        recent_tokens = sum(entry.get("tokens", 0) for entry in recent_api_calls)
+
+        # Calculate available resources
+        state = {
+            "cpu_usage": cpu_percent,
+            "cpu_available": 100 - cpu_percent,
+            "memory_usage": memory.percent,
+            "memory_available": 100 - memory.percent,
+            "tokens_used_this_minute": recent_tokens,
+            "tokens_available": self.warning_thresholds["embedding_tpm"] - recent_tokens,
+            "api_calls_this_minute": len(recent_api_calls),
+            "api_calls_available": self.warning_thresholds["api_rpm"] - len(recent_api_calls)
+        }
+
+        # Add warnings if thresholds are approached
+        state["warnings"] = []
+
+        if state["cpu_usage"] > self.warning_thresholds["cpu"]:
+            state["warnings"].append("CPU usage critical")
+
+        if state["memory_usage"] > self.warning_thresholds["memory"]:
+            state["warnings"].append("Memory usage critical")
+
+        if state["tokens_used_this_minute"] > self.warning_thresholds["embedding_tpm"] * 0.9:
+            state["warnings"].append("Approaching embedding TPM limit")
+
+        if state["api_calls_this_minute"] > self.warning_thresholds["api_rpm"] * 0.9:
+            state["warnings"].append("Approaching API RPM limit")
+
+        # Record current state in history
+        self.history.append({
+            "timestamp": time.time(),
+            "minute": current_minute,
+            "type": "system_state",
+            "state": state
+        })
+
+        return state
+
+    def record_api_call(self, api_type, tokens=0, latency=0):
+        """Record an API call for rate monitoring."""
+        current_minute = int((time.time() - self.start_time) / 60)
+
+        self.history.append({
+            "timestamp": time.time(),
+            "minute": current_minute,
+            "type": "api_call",
+            "api_type": api_type,
+            "tokens": tokens,
+            "latency": latency
+        })
+
+    def optimize_resources(self):
+        """Suggest resource optimizations based on current state."""
+        state = self.get_current_state()
+        optimizations = {}
+
+        # Optimize batch sizes based on current usage
+        if state["cpu_available"] < 20 or state["memory_available"] < 20:
+            # System under heavy load, reduce batch sizes
+            optimizations["embedding_batch_size"] = 100
+            optimizations["processing_batch_size"] = 5
+            optimizations["max_parallel_processes"] = 4
+        elif state["cpu_available"] > 50 and state["memory_available"] > 50:
+            # System has plenty of resources, increase throughput
+            optimizations["embedding_batch_size"] = 1000
+            optimizations["processing_batch_size"] = 20
+            optimizations["max_parallel_processes"] = 12
+        else:
+            # Moderate resource availability
+            optimizations["embedding_batch_size"] = 500
+            optimizations["processing_batch_size"] = 10
+            optimizations["max_parallel_processes"] = 8
+
+        # Adjust API call strategies based on rate limits
+        if state["tokens_available"] < 1000000 or state["api_calls_available"] < 2000:
+            # Approaching rate limits, implement throttling
+            optimizations["throttle_embeddings"] = True
+            optimizations["min_time_between_calls"] = 0.1  # seconds
+        else:
+            optimizations["throttle_embeddings"] = False
+            optimizations["min_time_between_calls"] = 0
+
+        return optimizations

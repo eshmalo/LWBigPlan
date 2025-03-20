@@ -1,0 +1,324 @@
+5. Research Agent Implementation
+5.1 Core Research Agent
+pythonCopyclass ResearchAgent:
+    """
+    Agent for conducting research in the knowledge corpus with dynamic parameter
+    adjustment and note-taking capabilities.
+    """
+
+    def __init__(self, vector_db, llm_service=None, resource_monitor=None):
+        self.vector_db = vector_db
+        self.llm_service = llm_service or LLMService(default_model="gpt-4")
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+        self.research_memory = {}
+        self.notes = {}
+
+    async def research(self, query, context=None, initial_params=None):
+        """Conduct research with dynamic parameter adjustment."""
+        # Generate a unique ID for this research session
+        research_id = f"research_{int(time.time())}"
+
+        # Determine initial parameters
+        params = initial_params or await self._determine_parameters(query, context)
+
+        # Record parameters for this research
+        self.notes[f"{research_id}_params"] = params
+
+        # Initial search
+        initial_results = await self._perform_search(query, params)
+
+        # Record initial results
+        self.notes[f"{research_id}_initial_results_count"] = len(initial_results)
+
+        # Analyze results to determine next steps
+        analysis = await self._analyze_results(query, initial_results, params, context)
+
+        # Record analysis
+        self.notes[f"{research_id}_analysis"] = analysis
+
+        # Check if we need further research
+        if analysis["information_sufficiency"] >= params["sufficiency_threshold"] or not analysis["follow_up_queries"]:
+            # Initial research is sufficient
+            self.notes[f"{research_id}_conclusion"] = "Initial research sufficient"
+            return self._prepare_final_results(research_id, initial_results, analysis, params)
+
+        # Conduct iterative research
+        all_results = initial_results.copy()
+        seen_chunk_ids = {result.metadata["chunk_id"] for result in all_results}
+        iterations = 1
+
+        # Store in research memory
+        self.research_memory[research_id] = {
+            "query": query,
+            "iterations": iterations,
+            "all_results": all_results,
+            "seen_chunk_ids": seen_chunk_ids,
+            "params": params,
+            "analysis": analysis
+        }
+
+        # Iterative deepening
+        while (iterations < params["max_iterations"] and
+               analysis["information_sufficiency"] < params["sufficiency_threshold"] and
+               analysis["follow_up_queries"]):
+
+            iterations += 1
+
+            # Adjust parameters based on previous results
+            adjusted_params = await self._adjust_parameters(params, analysis, iterations)
+
+            # Record parameter adjustments
+            self.notes[f"{research_id}_iteration_{iterations}_params"] = adjusted_params
+
+            # Execute follow-up queries
+            iteration_results = []
+            for follow_up_query in analysis["follow_up_queries"]:
+                # Execute query
+                query_results = await self._perform_search(follow_up_query, adjusted_params)
+
+                # Filter out already seen chunks
+                new_results = [result for result in query_results
+                              if result.metadata["chunk_id"] not in seen_chunk_ids]
+
+                # Update seen chunks
+                for result in new_results:
+                    seen_chunk_ids.add(result.metadata["chunk_id"])
+
+                # Add to iteration results
+                iteration_results.extend(new_results)
+
+            # Record iteration results
+            self.notes[f"{research_id}_iteration_{iterations}_results_count"] = len(iteration_results)
+
+            # If no new results, break
+            if not iteration_results:
+                self.notes[f"{research_id}_conclusion"] = "No new results found in iteration"
+                break
+
+            # Add new results to overall collection
+            all_results.extend(iteration_results)
+
+            # Analyze combined results
+            analysis = await self._analyze_results(query, all_results, adjusted_params, context)
+
+            # Record analysis
+            self.notes[f"{research_id}_iteration_{iterations}_analysis"] = analysis
+
+            # Update research memory
+            self.research_memory[research_id].update({
+                "iterations": iterations,
+                "all_results": all_results,
+                "seen_chunk_ids": seen_chunk_ids,
+                "latest_analysis": analysis
+            })
+
+        # Final conclusion
+        self.notes[f"{research_id}_conclusion"] = (
+            f"Research completed after {iterations} iterations with "
+            f"information sufficiency: {analysis['information_sufficiency']}"
+        )
+
+        # Prepare final results
+        return self._prepare_final_results(research_id, all_results, analysis, params)
+5.2 Parameter Determination and Adjustment
+pythonCopy    async def _determine_parameters(self, query, context=None):
+        """Determine optimal research parameters for the query."""
+        # Create prompt for parameter determination with JSON form
+        context_text = self._format_context(context) if context else "No previous context"
+
+        prompt = f"""
+        You are a research strategist for a knowledge corpus question answering system.
+        Determine the optimal research parameters for this query.
+
+        QUERY: {query}
+
+        CONVERSATION CONTEXT:
+        {context_text}
+
+        Based on this query, determine the optimal research approach.
+        Provide your recommendations in the following JSON format:
+
+        {{
+            "query_type": "factual"|"interpretive"|"comparative"|"historical"|"technical",
+            "complexity": 1-10 (1 = simple, 10 = complex),
+            "expected_search_breadth": 1-10 (1 = narrow, 10 = broad),
+            "top_k": Number of initial results to retrieve (5-30),
+            "max_iterations": Maximum research iterations (1-5),
+            "similarity_threshold": Minimum similarity score (0.0-1.0),
+            "sufficiency_threshold": Information sufficiency threshold (0.0-1.0),
+            "metadata_filters": {{
+                Optional metadata filters to apply
+            }},
+            "notes": "Explanation of your parameter choices"
+        }}
+
+        Choose values that will lead to optimal research efficiency and accuracy.
+        """
+
+        # Get LLM recommendation
+        param_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            note_id=f"param_determination_{int(time.time())}"
+        )
+
+        # Parse the response
+        try:
+            parameters = json.loads(param_result)
+        except json.JSONDecodeError:
+            # Fallback to default parameters
+            parameters = {
+                "query_type": "factual",
+                "complexity": 5,
+                "expected_search_breadth": 5,
+                "top_k": 10,
+                "max_iterations": 3,
+                "similarity_threshold": 0.7,
+                "sufficiency_threshold": 0.8,
+                "metadata_filters": {},
+                "notes": "Using default parameters due to parsing failure."
+            }
+
+        return parameters
+
+    async def _adjust_parameters(self, current_params, analysis, iteration):
+        """Adjust search parameters based on analysis."""
+        # Start with current parameters
+        adjusted_params = current_params.copy()
+
+        # Create prompt for parameter adjustment with JSON form
+        prompt = f"""
+        You are a research optimization expert. Adjust search parameters based on current analysis results.
+
+        CURRENT PARAMETERS:
+        {json.dumps(current_params, indent=2)}
+
+        ANALYSIS RESULTS:
+        {json.dumps(analysis, indent=2)}
+
+        CURRENT ITERATION: {iteration}
+
+        Based on the analysis results, recommend adjusted parameters for the next search iteration.
+        Provide your recommendations in the following JSON format:
+
+        {{
+            "top_k": Number of results to retrieve (5-30),
+            "similarity_threshold": Minimum similarity score (0.0-1.0),
+            "metadata_filters": {{
+                Optional metadata filters to apply based on analysis
+            }},
+            "parameter_adjustments": [
+                "List of specific parameter changes made and why"
+            ],
+            "notes": "Explanation of your adjustment strategy"
+        }}
+
+        Focus on addressing the information gaps identified in the analysis.
+        """
+
+        # Get LLM recommendation
+        adjustment_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            note_id=f"param_adjustment_iter_{iteration}_{int(time.time())}"
+        )
+
+        # Apply adjustments
+        adjustments = self._parse_adjustment_result(adjustment_result)
+        self._apply_parameter_adjustments(adjusted_params, adjustments, iteration)
+
+        return adjusted_params
+5.3 Result Analysis
+pythonCopy    async def _analyze_results(self, query, results, params, context=None):
+        """Analyze search results to determine next steps."""
+        # Format results for analysis
+        formatted_results = self._format_results_for_analysis(results)
+        context_text = self._format_context(context) if context else "No previous context"
+
+        # Create analysis prompt with JSON form
+        prompt = f"""
+        You are a research analyst for a knowledge corpus. Analyze these search results and determine next steps.
+
+        ORIGINAL QUERY: {query}
+
+        CONVERSATION CONTEXT:
+        {context_text}
+
+        SEARCH RESULTS:
+        {formatted_results}
+
+        Analyze these results carefully and provide your assessment in the following JSON format:
+
+        {{
+            "information_sufficiency": 0.0-1.0 (how well these results answer the query),
+            "key_findings": [
+                "List of key information found in the results"
+            ],
+            "information_gaps": [
+                "List of missing information needed to fully answer the query"
+            ],
+            "follow_up_queries": [
+                "List of specific follow-up queries to fill the information gaps"
+            ],
+            "irrelevant_results": [
+                Indices of results that seem irrelevant to the query (0-based)
+            ],
+            "metadata_recommendations": {{
+                Recommended metadata filters to focus subsequent searches
+            }},
+            "notes": "Your observations about the results and recommendations"
+        }}
+
+        Be thorough in identifying information gaps and formulating precise follow-up queries.
+        """
+
+        # Get LLM analysis
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            note_id=f"results_analysis_{int(time.time())}"
+        )
+
+        # Parse the response
+        try:
+            analysis = json.loads(analysis_result)
+        except json.JSONDecodeError:
+            # Fallback to basic analysis
+            analysis = {
+                "information_sufficiency": 0.5,
+                "key_findings": ["Unable to parse key findings"],
+                "information_gaps": ["Unable to parse information gaps"],
+                "follow_up_queries": [],
+                "irrelevant_results": [],
+                "metadata_recommendations": {},
+                "notes": "Analysis parsing failed, using default values."
+            }
+
+        return analysis
+
+    def _prepare_final_results(self, research_id, all_results, analysis, params):
+        """Prepare final results object."""
+        # Deduplicate and organize chunks
+        processed_results = self._deduplicate_and_organize_chunks(all_results)
+
+        # Get research memory
+        memory = self.research_memory.get(research_id, {})
+
+        # Build final result
+        final_result = {
+            "research_id": research_id,
+            "original_query": memory.get("query", "Unknown"),
+            "chunks": processed_results,
+            "chunk_count": len(processed_results),
+            "key_findings": analysis.get("key_findings", []),
+            "information_gaps": analysis.get("information_gaps", []),
+            "information_sufficiency": analysis.get("information_sufficiency", 0),
+            "iterations": memory.get("iterations", 1),
+            "parameters": params,
+            "notes": self.notes.get(f"{research_id}_conclusion", "")
+        }
+
+        return final_result

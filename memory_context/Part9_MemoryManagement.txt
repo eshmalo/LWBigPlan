@@ -1,0 +1,287 @@
+12. Advanced Memory Management
+12.1 Conversation Memory Manager
+pythonCopyclass ConversationMemoryManager:
+    """
+    Manages conversation history with dynamic compression and context-aware retrieval.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.memory_by_session = {}
+        self.summary_by_session = {}
+
+    def add_message(self, session_id, message):
+        """Add a message to conversation memory."""
+        if session_id not in self.memory_by_session:
+            self.memory_by_session[session_id] = []
+
+        self.memory_by_session[session_id].append(message)
+
+        # Check if we need to compress memory
+        if len(self.memory_by_session[session_id]) > 10:
+            self._compress_memory(session_id)
+
+    async def get_relevant_history(self, session_id, query, max_messages=5):
+        """Get the most relevant messages from conversation history."""
+        if session_id not in self.memory_by_session:
+            return []
+
+        # Always include the last few messages for continuity
+        recent_messages = self.memory_by_session[session_id][-3:]
+
+        # If we have few messages or don't need relevance filtering, return them
+        if len(self.memory_by_session[session_id]) <= max_messages:
+            return self.memory_by_session[session_id]
+
+        # Get summary if available
+        summary = self.summary_by_session.get(session_id, "")
+
+        # Evaluate relevance of older messages
+        older_messages = self.memory_by_session[session_id][:-3]
+        if not older_messages:
+            return recent_messages
+
+        # Use LLM to select relevant messages
+        relevant_indices = await self._select_relevant_messages(
+            query, older_messages, summary, max_messages - len(recent_messages)
+        )
+
+        # Combine relevant older messages with recent ones
+        relevant_older = [older_messages[i] for i in relevant_indices]
+        return relevant_older + recent_messages
+
+    async def _compress_memory(self, session_id):
+        """Compress conversation memory by summarizing older messages."""
+        messages = self.memory_by_session[session_id]
+
+        # Keep the most recent messages intact
+        recent_count = 5
+        if len(messages) <= recent_count:
+            return
+
+        # Messages to summarize
+        to_summarize = messages[:-recent_count]
+
+        # Format messages for summarization
+        formatted_messages = "\n".join([
+            f"{'User' if msg['role']=='user' else 'Assistant'}: {msg['content']}"
+            for msg in to_summarize
+        ])
+
+        # Generate summary with LLM
+        prompt = f"""
+        Summarize the following conversation exchanges concisely while preserving key information:
+
+        {formatted_messages}
+
+        Provide a short summary that captures the essential points of this conversation history.
+        Focus especially on any persistent topics or important details that might be relevant for future questions.
+        """
+
+        summary = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        # Store summary
+        self.summary_by_session[session_id] = summary
+
+        # Replace older messages with summary
+        self.memory_by_session[session_id] = [
+            {"role": "system", "content": f"Previous conversation summary: {summary}"}
+        ] + messages[-recent_count:]
+
+    async def _select_relevant_messages(self, query, messages, summary, max_count):
+        """Select the most relevant messages for the current query."""
+        # Format messages
+        formatted_messages = []
+        for i, msg in enumerate(messages):
+            if msg["role"] == "system" and "summary" in msg["content"]:
+                continue  # Skip system summaries
+            formatted_messages.append(f"[{i}] {'User' if msg['role']=='user' else 'Assistant'}: {msg['content']}")
+
+        # Create prompt
+        prompt = f"""
+        CONVERSATION SUMMARY: {summary}
+
+        MESSAGES:
+        {chr(10).join(formatted_messages)}
+
+        CURRENT QUERY: {query}
+
+        Select up to {max_count} message indices that are most relevant to the current query.
+        Consider:
+        1. Messages that discuss topics related to the current query
+        2. Messages that provide context needed to understand the query
+        3. Previous questions similar to the current query
+
+        Return only the message indices as a comma-separated list, e.g., "1,4,7"
+        """
+
+        # Get LLM recommendations
+        result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2
+        )
+
+        # Parse indices
+        try:
+            indices = [int(idx.strip()) for idx in result.strip().split(",")]
+            return [idx for idx in indices if 0 <= idx < len(messages)]
+        except:
+            # Fallback to most recent messages
+            return list(range(max(0, len(messages) - max_count), len(messages)))
+12.2 Knowledge Context Manager
+pythonCopyclass KnowledgeContextManager:
+    """
+    Manages the active knowledge context with dynamic prioritization and relevance tracking.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.knowledge_by_session = {}
+        self.relevance_scores = {}
+
+    def update_knowledge(self, session_id, new_chunks, query):
+        """Update knowledge context with new chunks."""
+        if session_id not in self.knowledge_by_session:
+            self.knowledge_by_session[session_id] = []
+            self.relevance_scores[session_id] = {}
+
+        # Add new chunks
+        for chunk in new_chunks:
+            chunk_id = chunk.metadata["chunk_id"]
+
+            # Check if chunk already exists
+            existing_ids = {c.metadata["chunk_id"] for c in self.knowledge_by_session[session_id]}
+            if chunk_id not in existing_ids:
+                self.knowledge_by_session[session_id].append(chunk)
+
+                # Initial relevance score based on position in search results
+                position_score = 1.0 - (new_chunks.index(chunk) / len(new_chunks))
+                self.relevance_scores[session_id][chunk_id] = position_score
+
+        # Prune knowledge if needed
+        self._prune_knowledge_context(session_id)
+
+    async def get_relevant_knowledge(self, session_id, query, max_chunks=10):
+        """Get the most relevant knowledge chunks for the current query."""
+        if session_id not in self.knowledge_by_session:
+            return []
+
+        # If we have few chunks, return them all
+        if len(self.knowledge_by_session[session_id]) <= max_chunks:
+            return self.knowledge_by_session[session_id]
+
+        # Update relevance scores based on current query
+        await self._update_relevance_scores(session_id, query)
+
+        # Sort chunks by relevance score
+        chunks = self.knowledge_by_session[session_id]
+        chunks_with_scores = [
+            (chunk, self.relevance_scores[session_id].get(chunk.metadata["chunk_id"], 0))
+            for chunk in chunks
+        ]
+        sorted_chunks = [chunk for chunk, score in sorted(
+            chunks_with_scores, key=lambda x: x[1], reverse=True
+        )]
+
+        # Return top chunks
+        return sorted_chunks[:max_chunks]
+
+    async def _update_relevance_scores(self, session_id, query):
+        """Update relevance scores based on current query."""
+        chunks = self.knowledge_by_session[session_id]
+
+        # Batch chunks for analysis
+        batch_size = 5
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i+batch_size]
+
+            # Format chunks for analysis
+            formatted_chunks = []
+            for j, chunk in enumerate(batch):
+                chunk_id = chunk.metadata["chunk_id"]
+                formatted_chunks.append(f"[{chunk_id}] {chunk.page_content[:200]}...")
+
+            # Create prompt
+            prompt = f"""
+            QUERY: {query}
+
+            KNOWLEDGE CHUNKS:
+            {chr(10).join(formatted_chunks)}
+
+            Rate each chunk's relevance to the query on a scale from 0.0 to 1.0,
+            where 1.0 means highly relevant and 0.0 means not relevant at all.
+
+            Return your ratings as a JSON object where keys are chunk IDs and values are relevance scores:
+            {{
+                "chunk_id_1": 0.7,
+                "chunk_id_2": 0.3,
+                ...
+            }}
+            """
+
+            # Get LLM ratings
+            result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+
+            # Parse and update scores
+            try:
+                ratings = json.loads(result)
+                for chunk_id, score in ratings.items():
+                    if chunk_id in self.relevance_scores[session_id]:
+                        # Average with existing score for stability
+                        old_score = self.relevance_scores[session_id][chunk_id]
+                        self.relevance_scores[session_id][chunk_id] = (old_score + score) / 2
+                    else:
+                        self.relevance_scores[session_id][chunk_id] = score
+            except:
+                # Fallback: keep existing scores
+                pass
+
+    def _prune_knowledge_context(self, session_id):
+        """Ensure knowledge context doesn't exceed token limits."""
+        chunks = self.knowledge_by_session[session_id]
+
+        # Use approximate token counting
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        # Calculate current token usage
+        total_tokens = sum(len(enc.encode(chunk.page_content)) for chunk in chunks)
+
+        # Maximum tokens (70% of context window)
+        max_tokens = 32000 * 0.7
+
+        # If we're under the limit, no need to prune
+        if total_tokens <= max_tokens:
+            return
+
+        # Sort chunks by relevance score
+        chunks_with_scores = [
+            (chunk, self.relevance_scores[session_id].get(chunk.metadata["chunk_id"], 0))
+            for chunk in chunks
+        ]
+        sorted_chunks = [chunk for chunk, score in sorted(
+            chunks_with_scores, key=lambda x: x[1], reverse=True
+        )]
+
+        # Keep adding chunks until we hit the token limit
+        kept_chunks = []
+        current_tokens = 0
+
+        for chunk in sorted_chunks:
+            chunk_tokens = len(enc.encode(chunk.page_content))
+            if current_tokens + chunk_tokens <= max_tokens:
+                kept_chunks.append(chunk)
+                current_tokens += chunk_tokens
+            else:
+                # Skip this chunk and continue checking others that might fit
+                continue
+
+        # Update knowledge context
+        self.knowledge_by_session[session_id] = kept_chunks

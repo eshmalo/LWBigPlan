@@ -1,0 +1,826 @@
+1. Agent Metadata and Self-Configuration System
+pythonCopyclass AgentMetadataManager:
+    """
+    Manages agent metadata and configuration, enabling agents to understand their roles,
+    capabilities, and how to interact with other system components.
+    """
+
+    def __init__(self):
+        self.agent_registry = {}
+        self.capability_registry = {}
+        self.interaction_patterns = {}
+        self.configuration_history = {}
+
+    async def register_agent(self, agent_id, agent_type, capabilities, llm_service):
+        """Register an agent with the system and generate its self-configuration."""
+        # Store basic agent information
+        self.agent_registry[agent_id] = {
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "capabilities": capabilities,
+            "created_at": time.time()
+        }
+
+        # Generate self-description and operating parameters
+        self_config = await self._generate_self_configuration(agent_id, agent_type, capabilities, llm_service)
+        self.agent_registry[agent_id].update(self_config)
+
+        # Register capabilities
+        for capability in capabilities:
+            if capability not in self.capability_registry:
+                self.capability_registry[capability] = []
+            self.capability_registry[capability].append(agent_id)
+
+        # Initialize configuration history
+        self.configuration_history[agent_id] = [{
+            "timestamp": time.time(),
+            "configuration": self_config,
+            "reason": "initial_configuration"
+        }]
+
+        return self_config
+
+    async def _generate_self_configuration(self, agent_id, agent_type, capabilities, llm_service):
+        """Use LLM to generate agent self-understanding and optimal operation parameters."""
+        prompt = f"""
+        As an AI system designer, create a comprehensive self-configuration for a {agent_type} agent
+        with ID "{agent_id}" and the following capabilities: {', '.join(capabilities)}.
+
+        Generate a detailed configuration that includes:
+
+        1. A precise self-description of the agent's purpose and responsibilities
+        2. Optimal operating parameters for this specific agent type
+        3. Decision-making framework appropriate to its role
+        4. Interaction protocols with other system components
+        5. Self-evaluation metrics to assess performance
+
+        Provide this as a structured JSON configuration that the agent will use to understand
+        its own function and behavior within the larger knowledge corpus research system.
+        """
+
+        config_result = await llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(config_result)
+        except:
+            # Fallback basic configuration
+            return {
+                "self_description": f"{agent_type} agent for knowledge corpus research",
+                "operating_parameters": {
+                    "decision_temperature": 0.3,
+                    "processing_depth": "medium",
+                    "initiative_level": "medium"
+                },
+                "decision_framework": {
+                    "evaluation_criteria": ["relevance", "accuracy", "efficiency"],
+                    "priority_ordering": ["accuracy", "relevance", "efficiency"]
+                }
+            }
+
+    async def update_agent_configuration(self, agent_id, updates, reason, llm_service):
+        """Update an agent's configuration based on performance or system changes."""
+        if agent_id not in self.agent_registry:
+            raise ValueError(f"Agent {agent_id} not registered")
+
+        # Get current configuration
+        current_config = self.agent_registry[agent_id]
+
+        # Generate updated configuration
+        prompt = f"""
+        The {current_config['agent_type']} agent with ID "{agent_id}" needs to update its configuration.
+
+        CURRENT CONFIGURATION:
+        {json.dumps(current_config, indent=2)}
+
+        REASON FOR UPDATE:
+        {reason}
+
+        REQUESTED UPDATES:
+        {json.dumps(updates, indent=2)}
+
+        Generate a revised configuration that incorporates these updates while maintaining
+        coherence with the agent's role and existing configuration. The updated configuration
+        should be compatible with the agent's capabilities and enhance its effectiveness.
+
+        Return the complete updated configuration as a JSON object.
+        """
+
+        updated_config_result = await llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            updated_config = json.loads(updated_config_result)
+
+            # Store the update in history
+            self.configuration_history[agent_id].append({
+                "timestamp": time.time(),
+                "configuration": updated_config,
+                "reason": reason
+            })
+
+            # Update the registry
+            self.agent_registry[agent_id] = updated_config
+
+            return updated_config
+        except:
+            # If parsing fails, apply just the specific updates
+            for key, value in updates.items():
+                if isinstance(value, dict) and key in current_config and isinstance(current_config[key], dict):
+                    # Merge nested dictionaries
+                    current_config[key].update(value)
+                else:
+                    # Replace or add value
+                    current_config[key] = value
+
+            # Store the update in history
+            self.configuration_history[agent_id].append({
+                "timestamp": time.time(),
+                "configuration": current_config,
+                "reason": f"{reason} (manual update)"
+            })
+
+            return current_config
+
+    async def generate_interaction_pattern(self, agent_id1, agent_id2, interaction_type, llm_service):
+        """Generate an optimal interaction pattern between two agents."""
+        if agent_id1 not in self.agent_registry or agent_id2 not in self.agent_registry:
+            raise ValueError("One or both agents not registered")
+
+        agent1 = self.agent_registry[agent_id1]
+        agent2 = self.agent_registry[agent_id2]
+
+        # Create or retrieve interaction key
+        interaction_key = f"{agent_id1}:{agent_id2}:{interaction_type}"
+
+        # Check if we already have this interaction pattern
+        if interaction_key in self.interaction_patterns:
+            return self.interaction_patterns[interaction_key]
+
+        # Generate new interaction pattern
+        prompt = f"""
+        Design an optimal interaction pattern between these two agents:
+
+        AGENT 1: {agent_id1} ({agent1['agent_type']})
+        Capabilities: {', '.join(agent1.get('capabilities', []))}
+        Self-description: {agent1.get('self_description', 'No description')}
+
+        AGENT 2: {agent_id2} ({agent2['agent_type']})
+        Capabilities: {', '.join(agent2.get('capabilities', []))}
+        Self-description: {agent2.get('self_description', 'No description')}
+
+        INTERACTION TYPE: {interaction_type}
+
+        Create a detailed interaction protocol that specifies:
+        1. Information exchange format
+        2. Sequence of operations
+        3. Decision boundaries (which agent decides what)
+        4. Failure handling procedures
+        5. Success criteria
+
+        Return this as a structured JSON pattern that both agents can follow to optimize their collaboration.
+        """
+
+        pattern_result = await llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            pattern = json.loads(pattern_result)
+            self.interaction_patterns[interaction_key] = pattern
+            return pattern
+        except:
+            # Fallback basic pattern
+            basic_pattern = {
+                "information_exchange": {
+                    "format": "json",
+                    "required_fields": ["request_type", "payload", "metadata"]
+                },
+                "sequence": [
+                    {"step": 1, "agent": agent_id1, "action": "initiate_request"},
+                    {"step": 2, "agent": agent_id2, "action": "process_request"},
+                    {"step": 3, "agent": agent_id2, "action": "return_results"},
+                    {"step": 4, "agent": agent_id1, "action": "integrate_results"}
+                ],
+                "error_handling": {
+                    "timeout": "retry_once_then_simplify",
+                    "incomplete_result": "request_clarification"
+                }
+            }
+            self.interaction_patterns[interaction_key] = basic_pattern
+            return basic_pattern
+2. Enhanced Orchestrator with Dynamic Agent Management
+pythonCopyclass DynamicOrchestrator:
+    """
+    Enhanced orchestrator with dynamic agent management and adaptive workflow configuration.
+    """
+
+    def __init__(self, vector_db, llm_service=None, resource_monitor=None):
+        self.vector_db = vector_db
+        self.llm_service = llm_service or LLMService(default_model="gpt-4")
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+
+        # Agent management
+        self.agent_metadata = AgentMetadataManager()
+        self.active_agents = {}
+
+        # Session management
+        self.sessions = {}
+
+        # Workflow templates
+        self.workflow_templates = {}
+
+        # Performance tracking
+        self.performance_metrics = {}
+
+    async def initialize_system(self):
+        """Initialize the orchestrator and register core agents."""
+        # Register core agents
+        await self._register_core_agents()
+
+        # Generate standard workflow templates
+        await self._generate_workflow_templates()
+
+        # Initialize performance tracking
+        self._initialize_performance_tracking()
+
+    async def _register_core_agents(self):
+        """Register and initialize all core system agents."""
+        # Research Agent
+        research_agent_id = "research_agent"
+        research_agent = ResearchAgent(self.vector_db, self.llm_service, self.resource_monitor)
+        await self.agent_metadata.register_agent(
+            agent_id=research_agent_id,
+            agent_type="research",
+            capabilities=["vector_search", "query_analysis", "information_synthesis"],
+            llm_service=self.llm_service
+        )
+        self.active_agents[research_agent_id] = research_agent
+
+        # Response Generator
+        response_agent_id = "response_generator"
+        response_generator = ResponseGenerator(self.llm_service)
+        await self.agent_metadata.register_agent(
+            agent_id=response_agent_id,
+            agent_type="response_generation",
+            capabilities=["context_integration", "query_interpretation", "narrative_construction"],
+            llm_service=self.llm_service
+        )
+        self.active_agents[response_agent_id] = response_generator
+
+        # Memory Manager
+        memory_manager_id = "memory_manager"
+        memory_manager = {
+            "conversation": ConversationMemoryManager(self.llm_service),
+            "knowledge": KnowledgeContextManager(self.llm_service)
+        }
+        await self.agent_metadata.register_agent(
+            agent_id=memory_manager_id,
+            agent_type="memory_management",
+            capabilities=["conversation_tracking", "knowledge_prioritization", "context_compression"],
+            llm_service=self.llm_service
+        )
+        self.active_agents[memory_manager_id] = memory_manager
+
+        # Multi-Strategy Searcher
+        search_agent_id = "search_agent"
+        search_agent = MultiStrategySearcher(self.vector_db, self.llm_service)
+        await self.agent_metadata.register_agent(
+            agent_id=search_agent_id,
+            agent_type="search",
+            capabilities=["query_type_detection", "multi_strategy_search", "result_aggregation"],
+            llm_service=self.llm_service
+        )
+        self.active_agents[search_agent_id] = search_agent
+
+    async def _generate_workflow_templates(self):
+        """Generate workflow templates for common query types."""
+        query_types = ["factual", "conceptual", "exploratory", "comparative", "clarification", "follow_up"]
+
+        for query_type in query_types:
+            workflow = await self._generate_workflow_for_query_type(query_type)
+            self.workflow_templates[query_type] = workflow
+
+    async def _generate_workflow_for_query_type(self, query_type):
+        """Generate an optimal workflow template for a specific query type."""
+        # Get all agent IDs and their capabilities
+        agent_info = {}
+        for agent_id, agent_data in self.agent_metadata.agent_registry.items():
+            agent_info[agent_id] = {
+                "type": agent_data["agent_type"],
+                "capabilities": agent_data.get("capabilities", [])
+            }
+
+        prompt = f"""
+        Design an optimal workflow for processing a {query_type} query in a knowledge corpus research system.
+
+        AVAILABLE AGENTS:
+        {json.dumps(agent_info, indent=2)}
+
+        QUERY TYPE: {query_type}
+
+        Create a detailed workflow that specifies:
+        1. Sequence of agent operations
+        2. Data flow between agents
+        3. Decision points and criteria
+        4. Parameter adjustment opportunities
+        5. Success criteria for each stage
+
+        The workflow should be adaptive to query complexity and available resources.
+        Return as a structured JSON workflow that the orchestrator can execute.
+        """
+
+        workflow_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(workflow_result)
+        except:
+            # Fallback to basic workflow
+            return {
+                "steps": [
+                    {"step": 1, "agent": "research_agent", "operation": "research", "required": True},
+                    {"step": 2, "agent": "memory_manager", "operation": "update_knowledge", "required": True},
+                    {"step": 3, "agent": "response_generator", "operation": "generate_response", "required": True}
+                ],
+                "decision_points": [
+                    {"after_step": 1, "criterion": "information_sufficiency", "threshold": 0.7}
+                ],
+                "parameter_adjustments": [
+                    {"step": 1, "parameter": "search_depth", "based_on": "query_complexity"}
+                ]
+            }
+
+    async def process_query(self, query, session_id, conversation_history=None):
+        """Process a user query with dynamic workflow selection and execution."""
+        # Initialize session if new
+        if session_id not in self.sessions:
+            self.sessions[session_id] = await self._initialize_session(session_id)
+
+        # Update conversation
+        session = self.sessions[session_id]
+        if conversation_history:
+            session["conversation"] = conversation_history
+        else:
+            session["conversation"].append({"role": "user", "content": query})
+
+        # Create execution context
+        execution_context = {
+            "query": query,
+            "session_id": session_id,
+            "timestamp": time.time(),
+            "execution_id": f"exec_{int(time.time())}_{session_id}",
+            "session": session
+        }
+
+        # Analyze query to determine optimal workflow
+        workflow = await self._select_optimal_workflow(query, session_id)
+        execution_context["workflow"] = workflow
+
+        # Execute workflow
+        result = await self._execute_workflow(workflow, execution_context)
+
+        # Update session with response
+        session["conversation"].append({"role": "assistant", "content": result["response"]})
+        session["last_activity"] = time.time()
+
+        # Update performance metrics
+        self._update_performance_metrics(execution_context, result)
+
+        return result["response"]
+
+    async def _initialize_session(self, session_id):
+        """Initialize a new session with default configuration."""
+        # Get resource state for initial configuration
+        resource_state = self.resource_monitor.get_current_state()
+
+        # Generate session configuration with LLM
+        prompt = f"""
+        Create an optimal initial configuration for a new knowledge corpus research session.
+
+        SYSTEM RESOURCE STATE:
+        {json.dumps(resource_state, indent=2)}
+
+        AVAILABLE AGENTS:
+        {json.dumps(list(self.active_agents.keys()), indent=2)}
+
+        Generate a session configuration that includes:
+        1. Default parameter values for each agent
+        2. Resource allocation strategy
+        3. Context management settings
+        4. Starting relevance thresholds
+
+        The configuration should be balanced for a new user with unknown preferences.
+        """
+
+        config_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            session_config = json.loads(config_result)
+        except:
+            # Fallback basic configuration
+            session_config = {
+                "parameters": {
+                    "research_agent": {
+                        "top_k": 10,
+                        "max_iterations": 2,
+                        "similarity_threshold": 0.7
+                    },
+                    "response_generator": {
+                        "detail_level": 7,
+                        "include_citations": True
+                    }
+                },
+                "context_management": {
+                    "conversation_importance": 5,
+                    "knowledge_importance": 8,
+                    "max_conversation_tokens": 4000,
+                    "max_knowledge_tokens": 8000
+                }
+            }
+
+        # Create the session
+        return {
+            "session_id": session_id,
+            "created_at": time.time(),
+            "last_activity": time.time(),
+            "conversation": [],
+            "knowledge_context": [],
+            "configuration": session_config,
+            "metrics": {
+                "total_queries": 0,
+                "avg_response_time": 0,
+                "information_sufficiency": []
+            }
+        }
+
+    async def _select_optimal_workflow(self, query, session_id):
+        """Select the optimal workflow for this query based on analysis."""
+        session = self.sessions[session_id]
+        conversation = session["conversation"]
+
+        # Create query analysis prompt
+        context_text = self._format_conversation(conversation[-5:] if len(conversation) > 5 else conversation)
+
+        prompt = f"""
+        Analyze this query to determine the optimal processing workflow.
+
+        QUERY: {query}
+
+        CONVERSATION CONTEXT:
+        {context_text}
+
+        Determine:
+        1. The primary query type (factual, conceptual, exploratory, comparative, clarification, follow_up)
+        2. Query complexity (1-10)
+        3. Expected search difficulty (1-10)
+        4. The relative importance of conversation history vs. new knowledge (percentage split)
+
+        Return your analysis as a JSON object with these determinations and a brief explanation.
+        """
+
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            analysis = json.loads(analysis_result)
+            query_type = analysis.get("primary_query_type", "factual").lower()
+
+            # Get the workflow template
+            if query_type in self.workflow_templates:
+                workflow = deepcopy(self.workflow_templates[query_type])
+            else:
+                workflow = deepcopy(self.workflow_templates["factual"])
+
+            # Customize workflow based on analysis
+            workflow["query_analysis"] = analysis
+            workflow = await self._customize_workflow(workflow, analysis, session)
+
+            return workflow
+
+        except:
+            # Fallback to basic factual workflow
+            return deepcopy(self.workflow_templates["factual"])
+
+    async def _customize_workflow(self, workflow, analysis, session):
+        """Customize workflow based on query analysis and session configuration."""
+        # Apply complexity-based adjustments
+        complexity = analysis.get("query_complexity", 5)
+
+        if complexity >= 8:
+            # For highly complex queries, add more research iterations
+            for step in workflow["steps"]:
+                if step.get("agent") == "research_agent" and step.get("operation") == "research":
+                    step["parameters"] = step.get("parameters", {})
+                    step["parameters"]["max_iterations"] = 4
+                    step["parameters"]["top_k"] = 15
+
+        # Apply search difficulty adjustments
+        search_difficulty = analysis.get("expected_search_difficulty", 5)
+
+        if search_difficulty >= 7:
+            # For difficult searches, add progressive search refinement
+            has_search_step = False
+            for step in workflow["steps"]:
+                if step.get("agent") == "search_agent":
+                    has_search_step = True
+                    step["parameters"] = step.get("parameters", {})
+                    step["parameters"]["use_progressive_refinement"] = True
+                    break
+
+            if not has_search_step:
+                # Add search step if not present
+                search_step = {
+                    "step": len(workflow["steps"]) + 1,
+                    "agent": "search_agent",
+                    "operation": "search",
+                    "required": True,
+                    "parameters": {
+                        "use_progressive_refinement": True
+                    }
+                }
+
+                # Insert before research step
+                research_index = None
+                for i, step in enumerate(workflow["steps"]):
+                    if step.get("agent") == "research_agent":
+                        research_index = i
+                        break
+
+                if research_index is not None:
+                    workflow["steps"].insert(research_index, search_step)
+                else:
+                    workflow["steps"].append(search_step)
+
+        # Apply conversation history importance
+        history_importance = analysis.get("conversation_history_importance", 50)
+
+        if history_importance > 70:
+            # Prioritize conversation context
+            for step in workflow["steps"]:
+                if step.get("agent") == "memory_manager":
+                    step["parameters"] = step.get("parameters", {})
+                    step["parameters"]["conversation_importance"] = 8
+                    step["parameters"]["knowledge_importance"] = 5
+
+        return workflow
+
+    async def _execute_workflow(self, workflow, context):
+        """Execute a workflow with the given context."""
+        start_time = time.time()
+        results = {"execution_log": []}
+
+        # Execute each step in sequence
+        for step in workflow["steps"]:
+            step_result = await self._execute_step(step, context, results)
+            results["execution_log"].append({
+                "step": step,
+                "success": step_result["success"],
+                "execution_time": step_result["execution_time"]
+            })
+
+            # Add step output to results
+            if "output" in step_result:
+                output_key = f"{step['agent']}_{step['operation']}_output"
+                results[output_key] = step_result["output"]
+
+            # Check for decision points after this step
+            decision_points = [d for d in workflow.get("decision_points", []) if d.get("after_step") == step.get("step")]
+            for decision in decision_points:
+                decision_result = await self._evaluate_decision(decision, context, results)
+                results["execution_log"].append({
+                    "decision": decision,
+                    "result": decision_result
+                })
+
+                # If decision indicates to skip remaining steps, break
+                if decision_result.get("skip_remaining", False):
+                    break
+
+        # Generate final response if not already set
+        if "response" not in results and "response_generator_generate_response_output" in results:
+            results["response"] = results["response_generator_generate_response_output"]
+
+        # Calculate total execution time
+        results["total_execution_time"] = time.time() - start_time
+
+        return results
+
+    async def _execute_step(self, step, context, previous_results):
+        """Execute a single workflow step."""
+        start_time = time.time()
+        result = {
+            "success": False,
+            "execution_time": 0
+        }
+
+        try:
+            agent_id = step["agent"]
+            operation = step["operation"]
+            parameters = step.get("parameters", {})
+
+            # Get the agent
+            if agent_id not in self.active_agents:
+                raise ValueError(f"Agent {agent_id} not found")
+
+            agent = self.active_agents[agent_id]
+
+            # Execute the operation
+            if agent_id == "research_agent" and operation == "research":
+                # Research operation
+                research_results = await agent.research(
+                    query=context["query"],
+                    context=context["session"]["conversation"],
+                    initial_params=parameters
+                )
+                result["output"] = research_results
+                result["success"] = True
+
+            elif agent_id == "memory_manager" and operation == "update_knowledge":
+                # Update knowledge context
+                knowledge_manager = agent["knowledge"]
+                research_results = previous_results.get("research_agent_research_output", {})
+                await knowledge_manager.update_knowledge(
+                    session_id=context["session_id"],
+                    new_chunks=research_results.get("chunks", []),
+                    query=context["query"]
+                )
+                result["success"] = True
+
+            elif agent_id == "response_generator" and operation == "generate_response":
+                # Generate response
+                memory_manager = self.active_agents["memory_manager"]
+                knowledge_chunks = await memory_manager["knowledge"].get_relevant_knowledge(
+                    session_id=context["session_id"],
+                    query=context["query"],
+                    max_chunks=parameters.get("max_chunks", 10)
+                )
+
+                response = await agent.generate_response(
+                    query=context["query"],
+                    knowledge_chunks=knowledge_chunks,
+                    conversation_history=context["session"]["conversation"],
+                    response_params=parameters
+                )
+                result["output"] = response
+                result["success"] = True
+
+            elif agent_id == "search_agent" and operation == "search":
+                # Execute search
+                query_type = context["workflow"].get("query_analysis", {}).get("primary_query_type", "auto")
+                search_results, metadata = await agent.search(
+                    query=context["query"],
+                    query_type=query_type,
+                    max_results=parameters.get("max_results", 20)
+                )
+                result["output"] = search_results
+                result["metadata"] = metadata
+                result["success"] = True
+
+            # Add other operations as needed
+
+        except Exception as e:
+            result["error"] = str(e)
+
+        # Record execution time
+        result["execution_time"] = time.time() - start_time
+
+        # If step failed but is required, try fallback
+        if not result["success"] and step.get("required", False):
+            fallback_result = await self._execute_fallback(step, context, previous_results)
+            if fallback_result["success"]:
+                return fallback_result
+
+        return result
+
+    async def _execute_fallback(self, failed_step, context, previous_results):
+        """Execute a fallback for a failed required step."""
+        # Generate fallback strategy
+        prompt = f"""
+        A required step in the workflow has failed and needs a fallback strategy.
+
+        FAILED STEP:
+        {json.dumps(failed_step, indent=2)}
+
+        ERROR:
+        {previous_results.get("error", "Unknown error")}
+
+        CONTEXT:
+        - Query: {context["query"]}
+        - Session ID: {context["session_id"]}
+
+        Generate a fallback strategy that will:
+        1. Accomplish the essential parts of the failed step
+        2. Use simpler or alternative approaches
+        3. Specify which agent and operation to use instead
+        4. Provide simplified parameters
+
+        Return as a JSON object with the fallback step specification.
+        """
+
+        fallback_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            fallback_step = json.loads(fallback_result)
+            return await self._execute_step(fallback_step, context, previous_results)
+        except:
+            # If fallback fails, create minimal success result
+            if failed_step["agent"] == "research_agent":
+                return {
+                    "success": True,
+                    "execution_time": 0.1,
+                    "output": {"chunks": [], "information_sufficiency": 0}
+                }
+            elif failed_step["agent"] == "response_generator":
+                return {
+                    "success": True,
+                    "execution_time": 0.1,
+                    "output": "I'm sorry, but I couldn't find relevant information to answer your question. Could you try rephrasing or asking something else?"
+                }
+            else:
+                return {
+                    "success": True,
+                    "execution_time": 0.1,
+                    "output": None
+                }
+
+    async def _evaluate_decision(self, decision, context, results):
+        """Evaluate a decision point in the workflow."""
+        criterion = decision.get("criterion", "")
+        threshold = decision.get("threshold", 0.5)
+
+        if criterion == "information_sufficiency":
+            # Check research results for sufficiency
+            research_results = results.get("research_agent_research_output", {})
+            sufficiency = research_results.get("information_sufficiency", 0)
+
+            return {
+                "criterion_value": sufficiency,
+                "threshold": threshold,
+                "passed": sufficiency >= threshold,
+                "skip_remaining": False
+            }
+
+        elif criterion == "query_answered":
+            # Check if query is already answered in conversation history
+            conversation = context["session"]["conversation"]
+
+            # Create prompt to check if query is already answered
+            query = context["query"]
+            recent_conversation = conversation[-6:] if len(conversation) > 6 else conversation
+
+            prompt = f"""
+            Determine if this query has already been answered in the recent conversation history.
+
+            QUERY: {query}
+
+            RECENT CONVERSATION:
+            {self._format_conversation(recent_conversation)}
+
+            Return a JSON with:
+            1. already_answered: true/false
+            2. confidence: 0.0-1.0 (how confident you are in this assessment)
+            3. location: message index where it was answered, if applicable
+            """
+
+            assessment_result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+
+            try:
+                assessment = json.loads(assessment_result)
+                return {
+                    "criterion_value": assessment.get("confidence", 0) if assessment.get("already_answered", False) else 0,
+                    "threshold": threshold,
+                    "passed": assessment.get("already_answered", False) and assessment.get("confidence", 0) >= threshold,
+                    "skip_remaining": assessment.get("already_answered", False) and assessment.get("confidence", 0) >= threshold
+                }
+            except:
+                return {"passed": False, "skip_remaining": False}
+
+        # Default response for unknown criteria
+        return {"passed": False, "skip_remaining": False}

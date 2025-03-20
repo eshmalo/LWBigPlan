@@ -1,0 +1,311 @@
+6. Orchestrator Implementation
+6.1 Core Orchestrator
+pythonCopyclass OrchestratorAgent:
+    """
+    Central orchestrator that coordinates the entire knowledge corpus chat system,
+    with dynamic parameter adjustment and note-taking capabilities.
+    """
+
+    def __init__(self, vector_db, llm_service=None, research_agent=None, resource_monitor=None):
+        self.vector_db = vector_db
+        self.llm_service = llm_service or LLMService(default_model="gpt-4")
+        self.research_agent = research_agent or ResearchAgent(vector_db, self.llm_service)
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+
+        # Conversation tracking
+        self.conversations = {}
+        self.knowledge_context = {}
+
+        # Notes storage
+        self.notes = {}
+
+    async def process_query(self, query, session_id, conversation_history=None):
+        """Process a user query."""
+        # Initialize session if new
+        if session_id not in self.conversations:
+            self.conversations[session_id] = []
+            self.knowledge_context[session_id] = []
+
+        # Update conversation with user query
+        if conversation_history:
+            self.conversations[session_id] = conversation_history
+        else:
+            self.conversations[session_id].append({"role": "user", "content": query})
+
+        # Create a unique ID for this query
+        query_id = f"{session_id}_{len(self.conversations[session_id])}"
+
+        # Analyze query to determine processing strategy
+        strategy = await self._determine_strategy(query, session_id)
+
+        # Record strategy
+        self.notes[f"query_{query_id}_strategy"] = strategy
+
+        # Research phase
+        if strategy["requires_research"]:
+            # Conduct research with the strategy parameters
+            research_results = await self.research_agent.research(
+                query=query,
+                context=self.conversations[session_id],
+                initial_params=strategy["research_params"]
+            )
+
+            # Update knowledge context
+            await self._update_knowledge_context(session_id, research_results, strategy)
+
+        # Generate response
+        response = await self._generate_response(query, session_id, strategy)
+
+        # Update conversation with response
+        self.conversations[session_id].append({"role": "assistant", "content": response})
+
+        # Record performance metrics
+        self._record_performance_metrics(query_id, strategy)
+
+        return response
+6.2 Query Strategy Determination
+pythonCopy    async def _determine_strategy(self, query, session_id):
+        """Determine processing strategy for the query."""
+        # Get conversation context
+        conversation = self.conversations[session_id]
+
+        # Format context for prompt
+        context_text = self._format_conversation(conversation)
+
+        # Summarize current knowledge context
+        knowledge_summary = self._summarize_knowledge_context(session_id)
+
+        # Create strategy determination prompt with JSON form
+        prompt = f"""
+        You are the orchestrator for a knowledge corpus question-answering system.
+        Determine the optimal processing strategy for this query.
+
+        USER QUERY: {query}
+
+        CONVERSATION HISTORY:
+        {context_text}
+
+        CURRENT KNOWLEDGE CONTEXT SUMMARY:
+        {knowledge_summary}
+
+        Based on this query and context, determine the optimal processing strategy.
+        Provide your recommendation in the following JSON format:
+
+        {{
+            "query_type": "factual"|"interpretive"|"comparative"|"clarification"|"follow_up",
+            "requires_research": true/false,
+            "is_follow_up_to_previous": true/false,
+            "requires_new_knowledge": true/false,
+            "research_params": {{
+                Optional parameters for research if required:
+                "top_k": Number of results to retrieve,
+                "max_iterations": Maximum research iterations,
+                etc.
+            }},
+            "context_relevance": {{
+                "conversation_importance": 1-10,
+                "knowledge_importance": 1-10,
+                "knowledge_sufficiency": 0.0-1.0
+            }},
+            "response_params": {{
+                "detail_level": 1-10,
+                "include_citations": true/false,
+                "include_sources": true/false
+            }},
+            "notes": "Explanation of your strategy recommendation"
+        }}
+
+        If the query is a follow-up or can be answered from existing context, set requires_research to false.
+        """
+
+        # Get LLM recommendation
+        strategy_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            note_id=f"strategy_{session_id}_{len(conversation)}"
+        )
+
+        # Parse the response
+        try:
+            strategy = json.loads(strategy_result)
+        except json.JSONDecodeError:
+            # Fallback to default strategy
+            strategy = {
+                "query_type": "factual",
+                "requires_research": True,
+                "is_follow_up_to_previous": False,
+                "requires_new_knowledge": True,
+                "research_params": {
+                    "top_k": 10,
+                    "max_iterations": 2
+                },
+                "context_relevance": {
+                    "conversation_importance": 5,
+                    "knowledge_importance": 8,
+                    "knowledge_sufficiency": 0.2
+                },
+                "response_params": {
+                    "detail_level": 7,
+                    "include_citations": True,
+                    "include_sources": True
+                },
+                "notes": "Using default strategy due to parsing failure."
+            }
+
+        return strategy
+6.3 Knowledge Context Management
+pythonCopy    async def _update_knowledge_context(self, session_id, research_results, strategy):
+        """Update the knowledge context with new research findings."""
+        # Get current knowledge context
+        current_knowledge = self.knowledge_context.get(session_id, [])
+
+        # Extract new chunks from research
+        new_chunks = research_results.get("chunks", [])
+
+        # Determine how to update knowledge context based on strategy
+        if strategy["query_type"] == "follow_up" and current_knowledge:
+            # For follow-up queries, merge new knowledge with existing
+            # Create prompt for knowledge integration with JSON form
+            knowledge_text = self._format_knowledge_chunks(current_knowledge)
+            new_knowledge_text = self._format_knowledge_chunks(new_chunks)
+
+            prompt = f"""
+            You are a knowledge integrator for a question-answering system.
+            Determine how to combine existing knowledge with new findings.
+
+            EXISTING KNOWLEDGE:
+            {knowledge_text}
+
+            NEW FINDINGS:
+            {new_knowledge_text}
+
+            STRATEGY:
+            {json.dumps(strategy, indent=2)}
+
+            Provide your recommendation for knowledge integration in the following JSON format:
+
+            {{
+                "keep_existing": [List of indices of existing knowledge to keep],
+                "add_new": [List of indices of new findings to add],
+                "knowledge_priority": "existing"|"new"|"balanced",
+                "notes": "Explanation of your integration strategy"
+            }}
+            """
+
+            # Get LLM recommendation
+            integration_result = await self.llm_service.generate_completion(
+                prompt=prompt,
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                note_id=f"knowledge_integration_{session_id}_{len(self.conversations[session_id])}"
+            )
+
+            try:
+                integration = json.loads(integration_result)
+
+                # Apply integration strategy
+                updated_knowledge = []
+
+                # Keep selected existing knowledge
+                if "keep_existing" in integration:
+                    for i in integration["keep_existing"]:
+                        if 0 <= i < len(current_knowledge):
+                            updated_knowledge.append(current_knowledge[i])
+
+                # Add selected new knowledge
+                if "add_new" in integration:
+                    for i in integration["add_new"]:
+                        if 0 <= i < len(new_chunks):
+                            updated_knowledge.append(new_chunks[i])
+
+                # Store notes if provided
+                if "notes" in integration:
+                    self.notes[f"knowledge_integration_{session_id}_{len(self.conversations[session_id])}"] = integration["notes"]
+
+                self.knowledge_context[session_id] = updated_knowledge
+
+            except json.JSONDecodeError:
+                # Fallback: keep all existing and add all new
+                self.knowledge_context[session_id] = current_knowledge + new_chunks
+
+        else:
+            # For new topics, replace knowledge context
+            self.knowledge_context[session_id] = new_chunks
+
+        # Ensure context doesn't exceed model limits
+        self._prune_knowledge_context(session_id)
+6.4 Response Generation
+pythonCopy    async def _generate_response(self, query, session_id, strategy):
+        """Generate a response to the user query."""
+        # Format knowledge context
+        knowledge_text = self._format_knowledge_chunks(
+            self.knowledge_context.get(session_id, []),
+            include_citations=strategy["response_params"]["include_citations"]
+        )
+
+        # Format conversation history
+        conversation_text = self._format_conversation(
+            self.conversations[session_id],
+            importance=strategy["context_relevance"]["conversation_importance"]
+        )
+
+        # Create system instruction
+        system_instruction = self._create_system_instruction(strategy)
+
+        # Following Claude's preferred format: knowledge first, then conversation, then query
+        prompt = f"""{system_instruction}
+
+KNOWLEDGE CONTEXT:
+{knowledge_text}
+
+CONVERSATION HISTORY:
+{conversation_text}
+
+USER QUERY:
+{query}
+"""
+
+        # Generate response
+        response = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.7,  # Slightly higher for more natural response
+            max_tokens=None,  # Allow model to determine length
+            note_id=f"response_{session_id}_{len(self.conversations[session_id])}"
+        )
+
+        return response
+
+    def _create_system_instruction(self, strategy):
+        """Create system instruction based on strategy."""
+        # Base instruction
+        instruction = "You are a knowledgeable assistant with expertise in researching and explaining information from a knowledge corpus."
+
+        # Add detail level
+        detail_level = strategy["response_params"]["detail_level"]
+        if detail_level <= 3:
+            instruction += " Provide concise, direct answers."
+        elif detail_level <= 7:
+            instruction += " Provide balanced, informative answers with appropriate detail."
+        else:
+            instruction += " Provide comprehensive, detailed explanations with nuance and depth."
+
+        # Add citation instructions
+        if strategy["response_params"]["include_citations"]:
+            instruction += " Cite sources using the reference numbers provided in the knowledge context [1], [2], etc."
+
+        # Add query-specific instructions
+        query_type = strategy["query_type"]
+        if query_type == "factual":
+            instruction += " Focus on factual accuracy and clarity."
+        elif query_type == "interpretive":
+            instruction += " Acknowledge various interpretations and perspectives."
+        elif query_type == "comparative":
+            instruction += " Compare and contrast different views or sources."
+        elif query_type == "follow_up":
+            instruction += " Build upon the previous conversation while addressing the new question."
+
+        # Add knowledge usage instruction
+        instruction += " Base your answer on the provided knowledge context. If the information needed is not in the context, acknowledge this limitation."
+
+        return instruction

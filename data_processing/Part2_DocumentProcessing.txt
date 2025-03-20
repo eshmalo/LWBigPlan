@@ -1,0 +1,314 @@
+3. Document Processing Pipeline
+3.1 Document Analysis and Metadata Extraction
+pythonCopyclass DocumentAnalyzer:
+    """
+    Analyzes documents to extract metadata and determine optimal processing parameters.
+    Uses LLMs to understand document structure and content characteristics.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.metadata_schema = self._load_metadata_schema()
+        self.analysis_notes = {}
+
+    async def analyze_document(self, document_path, document_content=None):
+        """Analyze a document to extract metadata and determine processing parameters."""
+        # Load content if not provided
+        if document_content is None:
+            document_content = self._load_document(document_path)
+
+        # Take representative sample for analysis
+        sample = self._create_representative_sample(document_content)
+
+        # Create analysis prompt with JSON form
+        analysis_prompt = self._create_analysis_prompt(document_path, sample)
+
+        # Get LLM analysis
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=analysis_prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        # Parse the response and extract processing parameters
+        analysis = self._parse_analysis_result(analysis_result)
+
+        # Store analysis notes
+        if "notes" in analysis:
+            self.analysis_notes[document_path] = analysis["notes"]
+
+        return {
+            "metadata": analysis.get("metadata", {}),
+            "processing_parameters": analysis.get("processing_parameters", {}),
+            "content_type": analysis.get("content_type", "unknown"),
+            "structural_analysis": analysis.get("structural_analysis", {})
+        }
+
+    def _create_analysis_prompt(self, document_path, sample):
+        """Create a prompt for document analysis with JSON form."""
+        filename = os.path.basename(document_path)
+
+        return f"""
+        You are a document analyzer specialized in understanding text corpora. Analyze this document sample and extract metadata.
+
+        DOCUMENT: {filename}
+        SAMPLE CONTENT:
+        {sample}
+
+        Provide your analysis in the following JSON format:
+
+        {{
+            "metadata": {{
+                "title": "Document title",
+                "author": "Author name if identified",
+                "publication_year": "Year if identified, otherwise null",
+                "language": "Primary language",
+                "content_type": "Type of text (e.g., academic, legal, religious, etc.)",
+                "category": "Subject category",
+                "domain": "Knowledge domain"
+            }},
+            "structural_analysis": {{
+                "has_chapters": true/false,
+                "has_sections": true/false,
+                "has_paragraphs": true/false,
+                "structural_patterns": "Description of structural patterns in the text"
+            }},
+            "processing_parameters": {{
+                "recommended_chunk_size": Integer (100-1000),
+                "recommended_chunk_overlap": Integer (10-100),
+                "chunking_strategy": "paragraph"|"section"|"sentence",
+                "key_terms_to_preserve": ["List", "of", "important", "terms"],
+                "special_handling_required": true/false
+            }},
+            "notes": "Any additional observations or recommendations for processing this document"
+        }}
+
+        Analyze the sample thoroughly to identify as many metadata fields as possible. If you cannot determine a value with confidence, use null.
+        """
+3.2 Content Chunking with Structural Awareness
+pythonCopyclass ChunkProcessor:
+    """
+    Processes documents into chunks with LLM-enhanced metadata extraction
+    for each chunk.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.chunk_notes = {}
+
+    async def process_document(self, document_path, content, document_analysis):
+        """Process a document into chunks with extracted metadata."""
+        # Extract processing parameters
+        params = document_analysis["processing_parameters"]
+        chunk_size = params.get("recommended_chunk_size", 512)
+        overlap = params.get("recommended_chunk_overlap", 50)
+        strategy = params.get("chunking_strategy", "paragraph")
+
+        # Create initial chunks based on strategy
+        raw_chunks = self._create_raw_chunks(content, strategy, chunk_size, overlap)
+
+        # Process chunks in parallel with asyncio tasks
+        import asyncio
+
+        # Create tasks for all chunks
+        tasks = []
+        for i, chunk in enumerate(raw_chunks):
+            task = self._process_chunk(
+                chunk_text=chunk,
+                chunk_index=i,
+                document_path=document_path,
+                document_analysis=document_analysis
+            )
+            tasks.append(task)
+
+        # Process in batches to avoid overwhelming API
+        batch_size = 5
+        processed_chunks = []
+
+        for i in range(0, len(tasks), batch_size):
+            batch_tasks = tasks[i:i+batch_size]
+            batch_results = await asyncio.gather(*batch_tasks)
+            processed_chunks.extend(batch_results)
+
+            # Small delay between batches
+            await asyncio.sleep(0.5)
+
+        return processed_chunks
+
+    async def _process_chunk(self, chunk_text, chunk_index, document_path, document_analysis):
+        """Process a single chunk to extract metadata and create Level 0 chunk."""
+        # Create a document ID from path
+        doc_id = f"doc_{hash(document_path) % 10000}"
+
+        # Create chunk ID
+        chunk_id = f"{doc_id}_chunk_{chunk_index}"
+
+        # Get structural analysis from document
+        structure = document_analysis.get("structural_analysis", {})
+
+        # Create metadata extraction prompt with JSON form
+        prompt = self._create_chunk_metadata_prompt(
+            chunk_text=chunk_text,
+            document_metadata=document_analysis["metadata"],
+            structure=structure
+        )
+
+        # Get LLM analysis
+        metadata_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.1,
+            response_format={"type": "json_object"}
+        )
+
+        # Parse the response
+        metadata = self._parse_metadata_result(metadata_result)
+
+        # Store notes if present
+        if "notes" in metadata:
+            self.chunk_notes[chunk_id] = metadata["notes"]
+            del metadata["notes"]
+
+        # Create the chunk object
+        chunk = {
+            "id": chunk_id,
+            "text": chunk_text,
+            "metadata": {
+                # Basic metadata
+                "doc_id": doc_id,
+                "document_path": os.path.relpath(document_path),
+                "document_name": os.path.basename(document_path),
+                "chunk_id": chunk_id,
+                "chunk_level": 0,
+                "chunk_index": chunk_index,
+                "contained_chunks": [chunk_id],
+
+                # Position in document (approximate)
+                "position": {
+                    "start": content.find(chunk_text) if chunk_text in content else -1,
+                    "end": content.find(chunk_text) + len(chunk_text) if chunk_text in content else -1
+                },
+
+                # Document metadata
+                "document_type": document_analysis["metadata"].get("content_type", "unknown"),
+                "document_language": document_analysis["metadata"].get("language", "unknown"),
+
+                # LLM-extracted chunk-specific metadata
+                **metadata
+            }
+        }
+
+        return chunk
+3.3 Multi-level Chunk Building
+pythonCopyclass MultilevelChunkBuilder:
+    """
+    Builds higher-level chunks from Level 0 chunks with dynamic parameter adjustment.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+        self.building_notes = {}
+
+    async def build_multilevel_chunks(self, level0_chunks, max_embedding_tokens):
+        """Build higher-level chunks from Level 0 chunks with dynamic parameters."""
+        # Analyze chunk characteristics to determine optimal parameters
+        chunking_params = await self._determine_optimal_parameters(level0_chunks[:20])
+
+        # Store all chunks by level
+        all_chunks = {0: level0_chunks}
+
+        # Process each level
+        current_level = 0
+        while True:
+            current_level += 1
+
+            # Check if we've reached the maximum level from parameters
+            if current_level > chunking_params["max_levels"]:
+                break
+
+            # Get chunks from previous level
+            prev_level_chunks = all_chunks[current_level - 1]
+
+            # If we have very few chunks at previous level, stop building
+            if len(prev_level_chunks) < chunking_params["min_chunks_to_combine"]:
+                break
+
+            # Build chunks for this level
+            current_level_chunks = await self._build_level_chunks(
+                prev_level_chunks,
+                current_level,
+                max_embedding_tokens,
+                chunking_params
+            )
+
+            # If no new chunks were created, stop
+            if not current_level_chunks:
+                break
+
+            # Store chunks for this level
+            all_chunks[current_level] = current_level_chunks
+
+            # Update notes
+            self.building_notes[f"level_{current_level}"] = {
+                "chunks_created": len(current_level_chunks),
+                "average_size": sum(len(c["text"]) for c in current_level_chunks) / len(current_level_chunks),
+                "parameters_used": chunking_params
+            }
+
+        return all_chunks
+
+    async def _determine_optimal_parameters(self, sample_chunks):
+        """Use LLM to determine optimal parameters for multilevel chunking."""
+        # Create a sample of chunk texts and their characteristics
+        sample_text = ""
+        for i, chunk in enumerate(sample_chunks[:5]):
+            sample_text += f"Chunk {i+1} (length: {len(chunk['text'])} chars):\n{chunk['text'][:200]}...\n\n"
+
+        # Calculate some statistics
+        avg_chunk_length = sum(len(c["text"]) for c in sample_chunks) / len(sample_chunks)
+        max_chunk_length = max(len(c["text"]) for c in sample_chunks)
+        min_chunk_length = min(len(c["text"]) for c in sample_chunks)
+
+        # Create the prompt with JSON form
+        prompt = f"""
+        You are a chunking optimization expert. Analyze these sample chunks and recommend optimal parameters.
+
+        CHUNK STATISTICS:
+        - Number of chunks: {len(sample_chunks)}
+        - Average chunk length: {avg_chunk_length:.2f} characters
+        - Maximum chunk length: {max_chunk_length} characters
+        - Minimum chunk length: {min_chunk_length} characters
+
+        SAMPLE CHUNKS:
+        {sample_text}
+
+        Based on these samples, determine the optimal parameters for building multi-level chunks.
+        Provide your recommendation in the following JSON format:
+
+        {{
+            "chunks_per_level": Number of chunks to combine per level (2-5),
+            "max_levels": Maximum levels to build (1-10),
+            "overlap_strategy": "none"|"adjacent"|"sliding_window",
+            "min_chunks_to_combine": Minimum chunks needed to build a higher level (2-5),
+            "prioritize_semantic_coherence": true/false,
+            "coherence_boundary_check": true/false,
+            "notes": "Explanation of your recommendations"
+        }}
+
+        Consider the nature of the text and importance of preserving semantic boundaries.
+        """
+
+        # Get LLM recommendation
+        recommendation = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        # Parse the response
+        params = self._parse_parameter_result(recommendation)
+
+        # Store notes
+        if "notes" in params:
+            self.building_notes["parameter_determination"] = params["notes"]
+
+        return params

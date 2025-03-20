@@ -1,0 +1,205 @@
+4. Vector Search and Retrieval System
+4.1 Embedding Service with Dynamic Batching
+pythonCopyclass EmbeddingService:
+    """
+    Service for generating embeddings with dynamic optimization and note-taking.
+    """
+
+    def __init__(self, model="text-embedding-3-large", resource_monitor=None):
+        self.model = model
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+        self.stats = {
+            "total_embeddings": 0,
+            "total_tokens": 0,
+            "avg_latency_ms": 0
+        }
+        self.notes = {}
+
+    async def embed_documents(self, documents, batch_size=None, optimize=True):
+        """Generate embeddings for documents with dynamic batching."""
+        import time
+        import asyncio
+        from openai import AsyncOpenAI
+
+        # Document ID extraction
+        doc_ids = []
+        doc_texts = []
+
+        for doc in documents:
+            if isinstance(doc, dict):
+                doc_texts.append(doc["text"])
+                doc_ids.append(doc["id"])
+            else:
+                # Assume Document object
+                doc_texts.append(doc.page_content)
+                doc_ids.append(doc.metadata.get("chunk_id", f"doc_{len(doc_ids)}"))
+
+        # Determine optimal batch size
+        if batch_size is None:
+            if optimize and self.resource_monitor:
+                # Get system resource state
+                resource_state = self.resource_monitor.get_current_state()
+                optimizations = self.resource_monitor.optimize_resources()
+                batch_size = optimizations.get("embedding_batch_size", 500)
+
+                # Record optimization notes
+                self.notes["batch_optimization"] = (
+                    f"Optimized batch size to {batch_size} based on "
+                    f"CPU: {resource_state.get('cpu_usage')}%, "
+                    f"Memory: {resource_state.get('memory_usage')}%, "
+                    f"API usage: {resource_state.get('tokens_used_this_minute', 0)} tokens"
+                )
+            else:
+                # Use model default
+                model_info = await self.get_model_info()
+                batch_size = model_info.get("recommended_batch_size", 1000)
+
+        # Split into batches
+        num_documents = len(doc_texts)
+        num_batches = (num_documents + batch_size - 1) // batch_size
+
+        # Create batches
+        text_batches = [doc_texts[i:i+batch_size] for i in range(0, num_documents, batch_size)]
+        id_batches = [doc_ids[i:i+batch_size] for i in range(0, num_documents, batch_size)]
+
+        # Initialize OpenAI client
+        client = AsyncOpenAI()
+
+        # Process batches
+        embeddings = {}
+
+        for batch_idx, (text_batch, id_batch) in enumerate(zip(text_batches, id_batches)):
+            # Record batch start time
+            batch_start = time.time()
+
+            # Check if we need to throttle due to rate limits
+            if batch_idx > 0 and self.resource_monitor:
+                resource_state = self.resource_monitor.get_current_state()
+                if resource_state.get("throttle_embeddings", False):
+                    await asyncio.sleep(resource_state.get("min_time_between_calls", 0.1))
+
+            try:
+                # Generate embeddings for this batch
+                response = await client.embeddings.create(
+                    model=self.model,
+                    input=text_batch
+                )
+
+                # Calculate latency
+                batch_latency = (time.time() - batch_start) * 1000
+
+                # Extract embeddings
+                batch_embeddings = [item.embedding for item in response.data]
+
+                # Update embeddings dictionary
+                for i, doc_id in enumerate(id_batch):
+                    embeddings[doc_id] = batch_embeddings[i]
+
+                # Update stats and record API call
+                self._update_stats(response, batch_latency, len(text_batch))
+
+            except Exception as e:
+                # Handle errors with exponential backoff and batch splitting
+                await self._handle_embedding_error(e, batch_idx, text_batch, id_batch, embeddings)
+
+        return embeddings
+4.2 Vector Database Integration
+pythonCopyclass VectorDatabaseManager:
+    """
+    Manages interactions with the vector database.
+    """
+
+    def __init__(self, persist_directory, collection_name="knowledge_corpus"):
+        self.persist_directory = persist_directory
+        self.collection_name = collection_name
+        self.db = None
+        self.embedding_function = None
+
+    def initialize(self, embedding_function=None):
+        """Initialize the vector database."""
+        from langchain.vectorstores import Chroma
+        from langchain.embeddings import OpenAIEmbeddings
+
+        # Set embedding function
+        self.embedding_function = embedding_function or OpenAIEmbeddings(model="text-embedding-3-large")
+
+        # Check if database exists
+        if os.path.exists(self.persist_directory):
+            # Load existing database
+            self.db = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embedding_function,
+                collection_name=self.collection_name
+            )
+        else:
+            # Create new database
+            os.makedirs(self.persist_directory, exist_ok=True)
+            self.db = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embedding_function,
+                collection_name=self.collection_name
+            )
+
+    def add_documents(self, documents, embeddings=None, batch_size=500):
+        """
+        Add documents to the vector database.
+
+        Args:
+            documents: List of Document objects or dictionaries
+            embeddings: Optional pre-computed embeddings
+            batch_size: Batch size for adding documents
+        """
+        from langchain.schema import Document
+
+        # Convert dictionaries to Document objects if needed
+        docs = []
+        for doc in documents:
+            if isinstance(doc, dict):
+                docs.append(Document(
+                    page_content=doc["text"],
+                    metadata=doc["metadata"]
+                ))
+            else:
+                docs.append(doc)
+
+        # Add documents in batches
+        for i in range(0, len(docs), batch_size):
+            end_idx = min(i + batch_size, len(docs))
+            batch_docs = docs[i:end_idx]
+
+            if embeddings:
+                batch_embeddings = embeddings[i:end_idx]
+                self.db.add_documents(
+                    documents=batch_docs,
+                    embeddings=batch_embeddings
+                )
+            else:
+                self.db.add_documents(documents=batch_docs)
+
+            print(f"Added {end_idx}/{len(docs)} documents to vector database")
+
+        # Persist changes
+        self.db.persist()
+
+    async def similarity_search(self, query, top_k=5, threshold=0.7, filter_dict=None):
+        """
+        Perform a similarity search.
+
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            threshold: Minimum similarity score
+            filter_dict: Optional metadata filters
+
+        Returns:
+            List of search results with relevance scores
+        """
+        # Perform search
+        results = self.db.similarity_search_with_relevance_scores(
+            query,
+            k=top_k,
+            score_threshold=threshold,
+            filter=filter_dict
+        )
+
+        return results

@@ -1,0 +1,137 @@
+13. Response Generation System
+13.1 Response Generator
+pythonCopyclass ResponseGenerator:
+    """
+    Generates responses using a structured approach with research findings.
+    """
+
+    def __init__(self, llm_service=None):
+        self.llm_service = llm_service or LLMService()
+
+    async def generate_response(self, query, knowledge_chunks, conversation_history, response_params):
+        """Generate a response based on knowledge and conversation context."""
+        # Format knowledge context
+        knowledge_text = self._format_knowledge_chunks(
+            knowledge_chunks,
+            include_citations=response_params.get("include_citations", True)
+        )
+
+        # Format conversation history
+        conversation_text = self._format_conversation(
+            conversation_history,
+            importance=response_params.get("conversation_importance", 5)
+        )
+
+        # Create system instruction
+        system_instruction = self._create_system_instruction(response_params)
+
+        # Create prompt with knowledge first (Claude's preference)
+        prompt = f"""{system_instruction}
+
+KNOWLEDGE CONTEXT:
+{knowledge_text}
+
+CONVERSATION HISTORY:
+{conversation_text}
+
+USER QUERY:
+{query}
+"""
+
+        # Generate response
+        response = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=response_params.get("temperature", 0.7),
+            max_tokens=response_params.get("max_tokens", None)
+        )
+
+        return response
+
+    def _create_system_instruction(self, response_params):
+        """Create system instruction based on response parameters."""
+        # Base instruction
+        instruction = "You are a knowledgeable assistant with expertise in researching and explaining information from a knowledge corpus."
+
+        # Add detail level
+        detail_level = response_params.get("detail_level", 7)
+        if detail_level <= 3:
+            instruction += " Provide concise, direct answers."
+        elif detail_level <= 7:
+            instruction += " Provide balanced, informative answers with appropriate detail."
+        else:
+            instruction += " Provide comprehensive, detailed explanations with nuance and depth."
+
+        # Add citation instructions
+        if response_params.get("include_citations", True):
+            instruction += " Cite sources using the reference numbers provided in the knowledge context [1], [2], etc."
+
+        # Add query-specific instructions
+        query_type = response_params.get("query_type", "factual")
+        if query_type == "factual":
+            instruction += " Focus on factual accuracy and clarity."
+        elif query_type == "interpretive":
+            instruction += " Acknowledge various interpretations and perspectives."
+        elif query_type == "comparative":
+            instruction += " Compare and contrast different views or sources."
+        elif query_type == "follow_up":
+            instruction += " Build upon the previous conversation while addressing the new question."
+
+        # Add knowledge usage instruction
+        instruction += " Base your answer on the provided knowledge context. If the information needed is not in the context, acknowledge this limitation."
+
+        return instruction
+
+    def _format_knowledge_chunks(self, chunks, include_citations=True):
+        """Format knowledge chunks for inclusion in prompts."""
+        if not chunks:
+            return "No relevant knowledge available."
+
+        formatted = ""
+        for i, chunk in enumerate(chunks):
+            # Format source information
+            metadata = chunk.metadata
+            source_info = f"{metadata.get('document_name', 'Unknown')}"
+
+            # Add specific location information if available
+            location_info = []
+            if "chapter" in metadata and metadata["chapter"]:
+                location_info.append(f"Chapter: {metadata['chapter']}")
+            if "section" in metadata and metadata["section"]:
+                location_info.append(f"Section: {metadata['section']}")
+            if "page" in metadata and metadata["page"]:
+                location_info.append(f"Page: {metadata['page']}")
+
+            if location_info:
+                source_info += f" ({', '.join(location_info)})"
+
+            # Format the chunk
+            if include_citations:
+                formatted += f"[{i+1}] {source_info}\n{chunk.page_content}\n\n"
+            else:
+                formatted += f"{source_info}\n{chunk.page_content}\n\n"
+
+        return formatted
+
+    def _format_conversation(self, conversation, importance=5):
+        """Format conversation history based on importance."""
+        if not conversation:
+            return "No previous conversation."
+
+        # Determine how many messages to include based on importance
+        if importance <= 3:
+            # Low importance: just the last exchange
+            messages = conversation[-2:] if len(conversation) >= 2 else conversation
+        elif importance <= 7:
+            # Medium importance: last 3 exchanges
+            messages = conversation[-6:] if len(conversation) >= 6 else conversation
+        else:
+            # High importance: more context
+            messages = conversation[-10:] if len(conversation) >= 10 else conversation
+
+        # Format messages
+        formatted = ""
+        for msg in messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            formatted += f"{role}: {msg['content']}\n\n"
+
+        return formatted

@@ -1,0 +1,293 @@
+9. Web Interface Implementation
+pythonCopyasync def initialize_and_run_system(input_folder="./input", output_folder="./output"):
+    """Initialize and run the complete knowledge corpus chat system."""
+    import os
+    import time
+    import asyncio
+    import uuid
+    from fastapi import FastAPI, WebSocket, HTTPException
+    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+    import uvicorn
+    import json
+
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Initialize components
+    print("Initializing resource monitor...")
+    resource_monitor = ResourceMonitor()
+
+    print("Initializing LLM service...")
+    llm_service = LLMService(resource_monitor=resource_monitor)
+
+    print("Initializing embedding service...")
+    embedding_service = EmbeddingService(resource_monitor=resource_monitor)
+
+    # Check if vector store already exists
+    vector_store_path = os.path.join(output_folder, "vector_store")
+    vector_store_exists = os.path.exists(vector_store_path)
+
+    if not vector_store_exists:
+        print("Vector store not found. Processing documents...")
+        await process_documents(input_folder, output_folder, llm_service, embedding_service, resource_monitor)
+
+    # Load vector database
+    from langchain.vectorstores import Chroma
+    from langchain.embeddings import OpenAIEmbeddings
+
+    print("Loading vector database...")
+    embedding_function = OpenAIEmbeddings(model="text-embedding-3-large")
+    vector_db = Chroma(
+        collection_name="knowledge_corpus",
+        persist_directory=vector_store_path,
+        embedding_function=embedding_function
+    )
+
+    # Initialize research agent
+    print("Initializing research agent...")
+    research_agent = ResearchAgent(vector_db, llm_service, resource_monitor)
+
+    # Initialize orchestrator
+    print("Initializing orchestrator...")
+    orchestrator = OrchestratorAgent(vector_db, llm_service, research_agent, resource_monitor)
+
+    # Create FastAPI app
+    app = FastAPI(title="Knowledge Corpus Chat System")
+
+    # Mount static files
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+    # Define routes
+    @app.get("/", response_class=HTMLResponse)
+    async def get_home():
+        with open("static/index.html", "r") as f:
+            return f.read()
+
+    @app.websocket("/chat")
+    async def websocket_endpoint(websocket: WebSocket):
+        await websocket.accept()
+
+        # Initialize session
+        session_id = str(uuid.uuid4())
+        conversation = []
+
+        try:
+            while True:
+                # Receive message
+                message = await websocket.receive_text()
+                data = json.loads(message)
+
+                if data["type"] == "query":
+                    # Process query
+                    query = data["content"]
+
+                    # Send acknowledgment
+                    await websocket.send_json({
+                        "type": "status",
+                        "content": "Processing your question..."
+                    })
+
+                    # Process with orchestrator
+                    response = await orchestrator.process_query(query, session_id, conversation)
+
+                    # Update conversation
+                    conversation.append({"role": "user", "content": query})
+                    conversation.append({"role": "assistant", "content": response})
+
+                    # Send response
+                    await websocket.send_json({
+                        "type": "response",
+                        "content": response
+                    })
+
+                elif data["type"] == "reset":
+                    # Reset conversation
+                    conversation = []
+                    session_id = str(uuid.uuid4())
+                    await websocket.send_json({
+                        "type": "status",
+                        "content": "Conversation reset."
+                    })
+
+        except Exception as e:
+            print(f"Error in websocket: {e}")
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"An error occurred: {str(e)}"
+                })
+            except:
+                pass
+            finally:
+                await websocket.close()
+
+    # Start the server
+    print("Starting server...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+10. Document Processing Pipeline
+pythonCopyasync def process_documents(input_folder, output_folder, llm_service, embedding_service, resource_monitor):
+    """Process all documents in the input folder."""
+    import os
+    import time
+    import asyncio
+    from concurrent.futures import ProcessPoolExecutor
+
+    start_time = time.time()
+
+    # Initialize document analyzer
+    document_analyzer = DocumentAnalyzer(llm_service)
+
+    # Initialize chunk processor
+    chunk_processor = ChunkProcessor(llm_service)
+
+    # Initialize multilevel chunk builder
+    chunk_builder = MultilevelChunkBuilder(llm_service)
+
+    # Discover all documents
+    documents = []
+    for root, _, files in os.walk(input_folder):
+        for filename in files:
+            if filename.endswith(('.txt', '.pdf', '.html', '.md')):
+                file_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(file_path, input_folder)
+
+                documents.append({
+                    "path": file_path,
+                    "rel_path": rel_path,
+                    "name": filename
+                })
+
+    print(f"Found {len(documents)} documents")
+
+    # Analyze documents in parallel
+    print("Analyzing documents...")
+
+    # Use ProcessPoolExecutor for CPU-bound tasks
+    max_workers = min(len(documents), os.cpu_count())
+
+    # Create tasks for document analysis
+    analysis_tasks = []
+    for doc in documents:
+        task = document_analyzer.analyze_document(doc["path"])
+        analysis_tasks.append((doc, task))
+
+    # Process tasks in batches to avoid overwhelming API
+    analysis_results = []
+    batch_size = 5
+
+    for i in range(0, len(analysis_tasks), batch_size):
+        batch = analysis_tasks[i:i+batch_size]
+        batch_docs = [item[0] for item in batch]
+        batch_tasks = [item[1] for item in batch]
+
+        # Wait for batch to complete
+        batch_results = await asyncio.gather(*batch_tasks)
+
+        # Combine results with documents
+        for j, result in enumerate(batch_results):
+            analysis_results.append((batch_docs[j], result))
+
+        print(f"Analyzed {len(analysis_results)}/{len(documents)} documents")
+
+        # Small delay between batches
+        await asyncio.sleep(0.5)
+
+    # Process documents into chunks
+    print("Processing documents into chunks...")
+    all_level0_chunks = []
+
+    for doc, analysis in analysis_results:
+        # Load document content if needed
+        with open(doc["path"], 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Process document into chunks
+        doc_chunks = await chunk_processor.process_document(doc["path"], content, analysis)
+        all_level0_chunks.extend(doc_chunks)
+
+        print(f"Created {len(doc_chunks)} Level 0 chunks for {doc['name']}")
+
+    print(f"Created total of {len(all_level0_chunks)} Level 0 chunks")
+
+    # Get model information for embedding
+    embedding_model_info = await embedding_service.get_model_info()
+
+    # Build multilevel chunks
+    print("Building multilevel chunks...")
+    all_chunks = await chunk_builder.build_multilevel_chunks(
+        all_level0_chunks,
+        embedding_model_info["max_tokens"]
+    )
+
+    # Count total chunks
+    total_chunks = sum(len(chunks) for level, chunks in all_chunks.items())
+    print(f"Created total of {total_chunks} chunks across {len(all_chunks)} levels")
+
+    # Flatten chunks for embedding
+    flat_chunks = []
+    for level_chunks in all_chunks.values():
+        flat_chunks.extend(level_chunks)
+
+    # Generate embeddings
+    print(f"Generating embeddings for {len(flat_chunks)} chunks...")
+    embeddings = await embedding_service.embed_documents(flat_chunks)
+    print(f"Generated {len(embeddings)} embeddings")
+
+    # Initialize vector database
+    from langchain.vectorstores import Chroma
+    from langchain.schema import Document
+
+    vector_store_path = os.path.join(output_folder, "vector_store")
+
+    # Convert to langchain Documents
+    documents = []
+    embeddings_list = []
+    metadatas = []
+    ids = []
+
+    for chunk in flat_chunks:
+        chunk_id = chunk["id"]
+
+        # Skip if we don't have an embedding
+        if chunk_id not in embeddings:
+            continue
+
+        # Create Document
+        doc = Document(
+            page_content=chunk["text"],
+            metadata=chunk["metadata"]
+        )
+
+        documents.append(doc)
+        embeddings_list.append(embeddings[chunk_id])
+        metadatas.append(chunk["metadata"])
+        ids.append(chunk_id)
+
+    # Create vector database
+    print("Creating vector database...")
+    vector_db = Chroma(
+        collection_name="knowledge_corpus",
+        persist_directory=vector_store_path
+    )
+
+    # Add documents in batches
+    batch_size = 500
+    for i in range(0, len(documents), batch_size):
+        end_idx = min(i + batch_size, len(documents))
+
+        vector_db.add_documents(
+            documents=documents[i:end_idx],
+            embeddings=embeddings_list[i:end_idx],
+            metadatas=metadatas[i:end_idx],
+            ids=ids[i:end_idx]
+        )
+
+        print(f"Added {end_idx}/{len(documents)} documents to vector database")
+
+    # Persist database
+    vector_db.persist()
+
+    # Record completion time
+    end_time = time.time()
+    print(f"Document processing completed in {end_time - start_time:.2f} seconds")

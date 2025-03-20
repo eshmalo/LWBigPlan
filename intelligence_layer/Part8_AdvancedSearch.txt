@@ -1,0 +1,313 @@
+11. Advanced Search Capabilities
+11.1 Progressive Search Refinement
+pythonCopyclass ProgressiveSearcher:
+    """
+    Implements progressive search refinement for complex queries.
+    """
+
+    def __init__(self, vector_db, llm_service):
+        self.vector_db = vector_db
+        self.llm_service = llm_service
+
+    async def progressive_search(self, query, max_iterations=3, initial_k=10):
+        """
+        Conduct a progressive search that refines results through multiple iterations.
+
+        Args:
+            query: Initial search query
+            max_iterations: Maximum number of iterations
+            initial_k: Initial number of results to retrieve
+
+        Returns:
+            Final set of results and search path
+        """
+        search_path = []
+        current_results = await self.vector_db.similarity_search(query, top_k=initial_k)
+        search_path.append({
+            "iteration": 1,
+            "query": query,
+            "results_count": len(current_results)
+        })
+
+        for iteration in range(2, max_iterations + 1):
+            # Analyze current results to refine search
+            analysis = await self._analyze_search_results(query, current_results)
+
+            # If results are sufficient, stop
+            if analysis["sufficiency_score"] > 0.8:
+                search_path.append({
+                    "iteration": iteration,
+                    "status": "sufficient",
+                    "sufficiency_score": analysis["sufficiency_score"]
+                })
+                break
+
+            # Generate refined query
+            refined_query = await self._generate_refined_query(query, current_results, analysis)
+
+            # Execute refined query
+            new_results = await self.vector_db.similarity_search(
+                refined_query,
+                top_k=initial_k,
+                threshold=0.6  # Lower threshold to get more diverse results
+            )
+
+            # Merge and deduplicate results
+            seen_ids = {doc.metadata["chunk_id"] for doc in current_results}
+            for doc in new_results:
+                if doc.metadata["chunk_id"] not in seen_ids:
+                    current_results.append(doc)
+                    seen_ids.add(doc.metadata["chunk_id"])
+
+            search_path.append({
+                "iteration": iteration,
+                "query": refined_query,
+                "new_results_count": len(new_results),
+                "total_results_count": len(current_results)
+            })
+
+        return current_results, search_path
+
+    async def _analyze_search_results(self, query, results):
+        """Analyze search results to determine next steps."""
+        # Format results for analysis
+        formatted_results = self._format_results(results)
+
+        prompt = f"""
+        Analyze these search results for the query: "{query}"
+
+        SEARCH RESULTS:
+        {formatted_results}
+
+        Determine how well these results answer the query and what information is still missing.
+        Return your analysis as JSON:
+
+        {{
+            "sufficiency_score": 0.0-1.0 (how well the results answer the query),
+            "covered_aspects": ["list", "of", "aspects", "covered", "well"],
+            "missing_aspects": ["list", "of", "aspects", "missing", "or", "inadequate"],
+            "key_terms_for_refinement": ["list", "of", "terms", "to", "focus", "on"]
+        }}
+        """
+
+        # Get LLM analysis
+        analysis_result = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        # Parse and return analysis
+        try:
+            return json.loads(analysis_result)
+        except:
+            return {
+                "sufficiency_score": 0.5,
+                "covered_aspects": [],
+                "missing_aspects": ["unknown due to parsing error"],
+                "key_terms_for_refinement": [query]
+            }
+
+    async def _generate_refined_query(self, original_query, current_results, analysis):
+        """Generate a refined query based on analysis of current results."""
+        prompt = f"""
+        Original query: "{original_query}"
+
+        Current search results cover these aspects well:
+        {', '.join(analysis["covered_aspects"])}
+
+        But these aspects are still missing or inadequate:
+        {', '.join(analysis["missing_aspects"])}
+
+        Generate a refined search query that will help find information about the missing aspects.
+        The query should be specific and focused on filling the gaps in current results.
+        """
+
+        refined_query = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        return refined_query.strip()
+11.2 Multi-Strategy Search
+pythonCopyclass MultiStrategySearcher:
+    """
+    Implements multiple search strategies to handle different query types.
+    """
+
+    def __init__(self, vector_db, llm_service):
+        self.vector_db = vector_db
+        self.llm_service = llm_service
+
+    async def search(self, query, query_type="auto", max_results=20):
+        """
+        Conduct search using the optimal strategy for the query type.
+
+        Args:
+            query: Search query
+            query_type: Type of query (factual, conceptual, exploratory, comparative, auto)
+            max_results: Maximum number of results to return
+
+        Returns:
+            Search results and search metadata
+        """
+        # If auto, determine query type
+        if query_type == "auto":
+            query_type = await self._determine_query_type(query)
+
+        # Choose search strategy based on query type
+        if query_type == "factual":
+            return await self._factual_search(query, max_results)
+        elif query_type == "conceptual":
+            return await self._conceptual_search(query, max_results)
+        elif query_type == "exploratory":
+            return await self._exploratory_search(query, max_results)
+        elif query_type == "comparative":
+            return await self._comparative_search(query, max_results)
+        else:
+            # Default to hybrid search
+            return await self._hybrid_search(query, max_results)
+
+    async def _determine_query_type(self, query):
+        """Determine the type of query using LLM analysis."""
+        prompt = f"""
+        Analyze this query and determine its type:
+
+        QUERY: {query}
+
+        Choose one of the following types:
+        - "factual": Seeking specific facts or definitions
+        - "conceptual": Exploring abstract concepts or principles
+        - "exploratory": Broad information gathering on a topic
+        - "comparative": Comparing different entities or viewpoints
+
+        Return only the query type as a single word with no additional text.
+        """
+
+        query_type = await self.llm_service.generate_completion(
+            prompt=prompt,
+            temperature=0.1
+        )
+
+        # Clean up response
+        query_type = query_type.strip().lower().replace('"', '').replace('.', '')
+
+        # Map to valid types
+        type_map = {
+            "factual": "factual",
+            "conceptual": "conceptual",
+            "exploratory": "exploratory",
+            "comparative": "comparative"
+        }
+
+        return type_map.get(query_type, "hybrid")
+
+    async def _factual_search(self, query, max_results):
+        """Optimized search for factual queries - high precision."""
+        # Extract key entities from query
+        entities = await self._extract_key_entities(query)
+
+        # Generate high-precision query
+        precision_query = f"{query} {' '.join(entities)}"
+
+        # Search with high threshold
+        results = await self.vector_db.similarity_search(
+            precision_query,
+            top_k=max_results,
+            threshold=0.75
+        )
+
+        return results, {"strategy": "factual", "entities": entities}
+
+    async def _conceptual_search(self, query, max_results):
+        """Optimized search for conceptual queries - semantic focus."""
+        # Extract key concepts from query
+        concepts = await self._extract_key_concepts(query)
+
+        # Search for each concept and combine results
+        all_results = []
+        seen_ids = set()
+
+        for concept in concepts:
+            concept_query = f"{concept} {query}"
+            concept_results = await self.vector_db.similarity_search(
+                concept_query,
+                top_k=max_results // len(concepts),
+                threshold=0.65
+            )
+
+            # Add unique results
+            for result in concept_results:
+                chunk_id = result.metadata["chunk_id"]
+                if chunk_id not in seen_ids:
+                    all_results.append(result)
+                    seen_ids.add(chunk_id)
+
+        return all_results, {"strategy": "conceptual", "concepts": concepts}
+
+    async def _exploratory_search(self, query, max_results):
+        """Optimized search for exploratory queries - broad coverage."""
+        # Create diverse sub-queries
+        sub_queries = await self._generate_exploratory_sub_queries(query)
+
+        # Search for each sub-query and combine results
+        all_results = []
+        seen_ids = set()
+
+        for sub_query in sub_queries:
+            sub_results = await self.vector_db.similarity_search(
+                sub_query,
+                top_k=max_results // len(sub_queries),
+                threshold=0.6  # Lower threshold for broader results
+            )
+
+            # Add unique results
+            for result in sub_results:
+                chunk_id = result.metadata["chunk_id"]
+                if chunk_id not in seen_ids:
+                    all_results.append(result)
+                    seen_ids.add(chunk_id)
+
+        return all_results, {"strategy": "exploratory", "sub_queries": sub_queries}
+
+    async def _comparative_search(self, query, max_results):
+        """Optimized search for comparative queries - multiple perspectives."""
+        # Extract entities being compared
+        comparison_entities = await self._extract_comparison_entities(query)
+
+        # Search for each entity and the comparison context
+        all_results = []
+        seen_ids = set()
+
+        # Search for each entity
+        for entity in comparison_entities:
+            entity_query = f"{entity} {query}"
+            entity_results = await self.vector_db.similarity_search(
+                entity_query,
+                top_k=max_results // (len(comparison_entities) + 1),
+                threshold=0.7
+            )
+
+            # Add unique results
+            for result in entity_results:
+                chunk_id = result.metadata["chunk_id"]
+                if chunk_id not in seen_ids:
+                    all_results.append(result)
+                    seen_ids.add(chunk_id)
+
+        # Also search for comparison terms
+        comparison_query = f"comparison between {' and '.join(comparison_entities)}"
+        comparison_results = await self.vector_db.similarity_search(
+            comparison_query,
+            top_k=max_results // (len(comparison_entities) + 1),
+            threshold=0.65
+        )
+
+        # Add unique comparison results
+        for result in comparison_results:
+            chunk_id = result.metadata["chunk_id"]
+            if chunk_id not in seen_ids:
+                all_results.append(result)
+                seen_ids.add(chunk_id)
+
+        return all_results, {"strategy": "comparative", "entities": comparison_entities}
